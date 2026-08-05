@@ -1,1 +1,6 @@
-# forex-ai-bot
+pandas
+numpy
+requests
+ta
+yfinance
+scikit-learn
