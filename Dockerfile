@@ -1,4 +1,3 @@
-
 FROM python:3.10-slim
 
 ENV PYTHONUNBUFFERED=1
@@ -13,9 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-# Warning छुपाने के लिए --no-warn-script-location का इस्तेमाल:
+
+# Warning हटाने के लिए --root-user-action=ignore जोड़ा गया है
 RUN pip install --no-cache-dir --upgrade pip
-RUN pip install --no-cache-dir --no-warn-script-location -r requirements.txt
+RUN pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
 
 COPY . .
 
