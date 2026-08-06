@@ -12,16 +12,13 @@ from sklearn.ensemble import RandomForestClassifier
 # 1. Web Service ke liye Flask Web Server
 app = Flask(__name__)
 
-
 @app.route("/")
 def home():
     return "Forex Trading Bot is Running Live 24/7!"
 
-
-# 2. Telegram Configuration
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
+# 2. Telegram Configuration (Directly Inserted)
+TELEGRAM_BOT_TOKEN = "8767606359:AAH7dZn_9dsT1HwmOkbvKAB2bgB2aEvOz0c"
+TELEGRAM_CHAT_ID = "6449682719"
 
 def send_telegram_alert(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -32,7 +29,7 @@ def send_telegram_alert(message):
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
-        "parse_mode": "Markdown",
+        "parse_mode": "Markdown"
     }
     try:
         response = requests.post(url, json=payload, timeout=10)
@@ -43,13 +40,10 @@ def send_telegram_alert(message):
     except Exception as e:
         print(f"❌ Error sending alert: {e}")
 
-
 def run_bot_logic():
     print("🔄 Fetching Market Data...")
     try:
-        data = yf.download(
-            "EURUSD=X", period="1mo", interval="1h", auto_adjust=True
-        )
+        data = yf.download("EURUSD=X", period="1mo", interval="1h", auto_adjust=True)
 
         if data.empty:
             print("❌ Data fetch failed!")
@@ -96,20 +90,20 @@ def run_bot_logic():
     except Exception as e:
         print(f"❌ Error in bot loop: {e}")
 
-
 def bot_loop():
+    # Pehli baar तुरन्त चलाएगा
+    run_bot_logic()
+    
+    # Iske baad har 1 ghante me chalega
     while True:
-        run_bot_logic()
         print("⏳ Waiting 1 hour for next analysis...")
-        time.sleep(3600)  # Har 1 ghante me chalega
+        time.sleep(3600)
 
+# Background Thread me bot ko chalana
+bot_thread = threading.Thread(target=bot_loop, daemon=True)
+bot_thread.start()
 
 if __name__ == "__main__":
-    # Background me bot ka loop start karna
-    threading.Thread(target=bot_loop, daemon=True).start()
-
-    # Render dwara diya gaya PORT pakdna
+    # Render web service ke liye port bind
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-
-    
