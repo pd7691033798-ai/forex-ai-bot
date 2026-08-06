@@ -1,55 +1,54 @@
-import streamlit as st
-import datetime
+import os
+from flask import Flask
 
-# Page Configuration
-st.set_page_config(page_title="My Forex AI Trading Bot", page_icon="📈", layout="centered")
+app = Flask(__name__)
 
-# App Header
-st.title("🤖 My Forex AI Trading App")
-st.caption("Automated Forex Analysis & Execution Dashboard")
+@app.route('/')
+def home():
+    return """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>My Forex AI Trading Bot</title>
+        <style>
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #0f172a; color: #f8fafc; text-align: center; padding: 20px; margin: 0; }
+            .container { max-width: 450px; margin: 0 auto; }
+            .card { background: #1e293b; padding: 20px; margin: 15px 0; border-radius: 16px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3); border: 1px solid #334155; }
+            .status { color: #38bdf8; font-weight: bold; font-size: 1.1em; }
+            .badge { background: #22c55e; color: #000; padding: 4px 12px; border-radius: 20px; font-weight: bold; font-size: 0.9em; }
+            .buy { color: #4ade80; font-weight: bold; }
+            .hold { color: #fbbf24; font-weight: bold; }
+            h1 { font-size: 1.6em; color: #f1f5f9; margin-bottom: 5px; }
+            p { margin: 8px 0; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🤖 My Forex AI Bot</h1>
+            <p style="color: #94a3b8; font-size: 0.9em;">Automated Trading Control Center</p>
+            
+            <div class="card">
+                <h3>⚡ Bot Status</h3>
+                <p><span class="badge">ONLINE 24/7</span></p>
+                <p class="status" style="margin-top: 10px;">Uptime Monitoring: Active 🟢</p>
+            </div>
 
-st.divider()
+            <div class="card">
+                <h3>📊 Live Market Signals</h3>
+                <hr style="border-color: #334155; margin: 15px 0;">
+                <p>GOLD (XAU/USD): <span class="buy">BUY 📈</span></p>
+                <p>EUR/USD: <span class="hold">HOLD ⏸️</span></p>
+                <p>GBP/USD: <span class="hold">HOLD ⏸️</span></p>
+            </div>
 
-# Status Indicator
-st.subheader("⚡ Bot Status")
-col1, col2 = st.columns(2)
-with col1:
-    st.metric(label="Server Status", value="Online 🟢")
-with col2:
-    st.metric(label="Uptime Monitoring", value="Active 24/7 ⏰")
+            <p style="color: #64748b; font-size: 0.8em; margin-top: 25px;">App Version 1.0 • Connected to Render Cloud</p>
+        </div>
+    </body>
+    </html>
+    """
 
-st.divider()
-
-# Control Panel
-st.subheader("⚙️ Control Panel")
-bot_active = st.toggle("Enable Auto Trading Signals", value=True)
-
-if bot_active:
-    st.success("Bot is running and actively scanning markets!")
-else:
-    st.warning("Bot is currently paused.")
-
-st.divider()
-
-# Market Signals Preview
-st.subheader("📊 Live Market Signals")
-
-col_a, col_b, col_c = st.columns(3)
-with col_a:
-    st.markdown("### EUR/USD")
-    st.info("Signal: HOLD ⏸️")
-    
-with col_b:
-    st.markdown("### XAU/USD (GOLD)")
-    st.success("Signal: BUY 📈")
-    st.caption("SL: 2380 | TP: 2410")
-
-with col_c:
-    st.markdown("### GBP/USD")
-    st.info("Signal: HOLD ⏸️")
-
-st.divider()
-
-# Last Updated Time
-st.caption(f"Last updated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
