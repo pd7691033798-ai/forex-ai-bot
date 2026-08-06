@@ -1,6 +1,8 @@
-pandas
-numpy
+flask
 requests
 yfinance
-scikit-learn
+pandas
+numpy
 ta
+scikit-learn
+gunicorn
