@@ -1,39 +1,3 @@
-
-Raw file content
-Copilot
-View options
-Skip to content
-pd7691033798-ai
-forex-ai-bot
-Repository navigation
-Code
-Issues
-Pull requests
-Agents
-Actions
-Projects
-Wiki
-Security and quality
-1
- (1)
-Insights
-Settings
-forex-ai-bot
-/main.py
-Go to file
-t
-T
-pd7691033798-ai
-pd7691033798-ai
-Rename main py to main.py
-10589d1
- · 
-16 minutes ago
-
-Code
-
-Blame
-98 lines (79 loc) · 3.09 KB
 import os
 import threading
 import time
@@ -129,7 +93,6 @@ def bot_loop():
 bot_thread = threading.Thread(target=bot_loop, daemon=True)
 bot_thread.start()
 
-if __name__ == "__main.py__":
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
- 
