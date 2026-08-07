@@ -15,7 +15,8 @@ app = Flask(__name__)
 # =========================================================
 # 1. CONFIGURATION (यहाँ अपनी सही डिटेल्स भरें)
 # =========================================================
-DERIV_API_TOKEN = "pat_a2b9451bb0cc6c81edd8b7a8af371667c6da81911743974fe453851cf128fa00"  # 👈 अपना Deriv API Token डालें
+DERIV_API_TOKEN =  "pat_89e4df8ec1147df432ee86dae0e74b9f05c90819de66c69471c7882c082dca35"
+# 👈 अपना Deriv API Token डालें
 APP_ID = "1089"                                 # 👈 Deriv Numeric App ID (1089 Standard है)
 
 TELEGRAM_BOT_TOKEN = "8767606359:AAH7dZn_9dsT1HwmOkbvKAB2bgB2aEvOz0c"  # 👈 अपना Telegram Bot Token लिखें
