@@ -13,7 +13,7 @@ DERIV_API_TOKEN = "YOUR_DERIV_API_TOKEN_HERE"  # 👈 यहाँ अपना 
 APP_ID = "pat_504c2a11cdff0965d23fa7cdcc496f8ab42756562baeaca3d5a04490b29ea9a3"  # Deriv Default App ID
 .send(json.dumps(proposal_req))
 
-        def send_deriv_trade(symbol, trade_type, amount=10):
+     def send_deriv_trade(symbol, trade_type, amount=10):
     print(f"👉 EXECUTION TRIGGERED FOR: {symbol} | {trade_type}", flush=True)
 
     def on_open(ws):
@@ -22,7 +22,7 @@ APP_ID = "pat_504c2a11cdff0965d23fa7cdcc496f8ab42756562baeaca3d5a04490b29ea9a3" 
 
     def on_message(ws, message):
         data = json.loads(message)
-        print(f"📩 Deriv Response: {data}", flush=True)  # <-- इससे पूरा Error दिखेगा
+        print(f"📩 Deriv Response: {data}", flush=True)
 
         if data.get("msg_type") == "authorize":
             if "error" in data:
@@ -32,7 +32,8 @@ APP_ID = "pat_504c2a11cdff0965d23fa7cdcc496f8ab42756562baeaca3d5a04490b29ea9a3" 
                 print("✅ Token Authorized! Sending Order Proposal...", flush=True)
                 deriv_symbol = "frxXAUUSD" if "XAU" in symbol else "frxEURUSD"
                 contract_type = "CALL" if trade_type == "BUY" else "PUT"
-                ws.send(json.dumps({
+                
+                proposal_req = {
                     "buy": 1, 
                     "price": amount,
                     "parameters": {
@@ -44,7 +45,9 @@ APP_ID = "pat_504c2a11cdff0965d23fa7cdcc496f8ab42756562baeaca3d5a04490b29ea9a3" 
                         "duration_unit": "m", 
                         "symbol": deriv_symbol
                     }
-                }))
+                }
+                # यहाँ ws.send होना ज़रूरी है
+                ws.send(json.dumps(proposal_req))
 
         elif data.get("msg_type") == "buy":
             if "error" in data:
@@ -56,13 +59,15 @@ APP_ID = "pat_504c2a11cdff0965d23fa7cdcc496f8ab42756562baeaca3d5a04490b29ea9a3" 
     def on_error(ws, error):
         print(f"⚠️ WS ERROR: {error}", flush=True)
 
+    ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
     ws = websocket.WebSocketApp(
-        f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}",
+        ws_url,
         on_open=on_open, 
         on_message=on_message,
         on_error=on_error
     )
     ws.run_forever()
+   
 
 
 # =========================================================
