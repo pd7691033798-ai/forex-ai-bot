@@ -1,9 +1,68 @@
 import os
 import threading
-from flask import Flask
+import json
+import websocket
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
+# =========================================================
+# 1. DERIV API AUTO-TRADE CONFIGURATION
+# =========================================================
+DERIV_API_TOKEN = "YOUR_DERIV_API_TOKEN_HERE"  # 👈 यहाँ अपना Deriv API Token डालें
+APP_ID = "1089"  # Deriv Default App ID
+
+def send_deriv_trade(symbol, trade_type, amount=10):
+    """
+    Deriv WebSockets API का उपयोग करके Auto Trade Execute करता है
+    """
+    def on_open(ws):
+        # Step 1: Authorize with Token
+        auth_data = {"authorize": DERIV_API_TOKEN}
+        ws.send(json.dumps(auth_data))
+
+    def on_message(ws, message):
+        data = json.loads(message)
+        
+        # Step 2: Auth Successful -> Send Trade Contract Proposal
+        if data.get("msg_type") == "authorize":
+            print("✅ Deriv Account Authorized Successfully!")
+            
+            # Map Symbols for Deriv Forex Symbols
+            deriv_symbol = "frxXAUUSD" if "XAU" in symbol else "frxEURUSD"
+            contract_type = "CALL" if trade_type == "BUY" else "PUT"
+            
+            proposal_req = {
+                "buy": 1,
+                "price": amount,
+                "parameters": {
+                    "amount": amount,
+                    "basis": "stake",
+                    "contract_type": contract_type,
+                    "currency": "USD",
+                    "duration": 5,
+                    "duration_unit": "m",  # 5 Minute Trade Duration
+                    "symbol": deriv_symbol
+                }
+            }
+            ws.send(json.dumps(proposal_req))
+
+        # Step 3: Trade Order Executed Response
+        elif data.get("msg_type") == "buy":
+            print(f"🚀 TRADE EXECUTED SUCCESSFULLY: {data.get('buy', {}).get('transaction_id')}")
+            ws.close()
+            
+        elif "error" in data:
+            print(f"❌ Deriv Trade Error: {data['error']['message']}")
+            ws.close()
+
+    ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
+    ws = websocket.WebSocketApp(ws_url, on_open=on_open, on_message=on_message)
+    ws.run_forever()
+
+# =========================================================
+# 2. WEB INTERFACE (Trading Terminal + TradingView Chart)
+# =========================================================
 @app.route('/')
 def home():
     return """
@@ -12,28 +71,28 @@ def home():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Forex AI Super App</title>
+        <title>Deriv AI Auto-Trading Terminal</title>
         <style>
             body { font-family: 'Segoe UI', Arial, sans-serif; background-color: #0d1117; color: #c9d1d9; margin: 0; padding: 10px; text-align: center; }
             .container { max-width: 600px; margin: 0 auto; }
-            .card { background: #161b22; border-radius: 12px; padding: 12px; margin-bottom: 15px; border: 1px solid #30363d; }
+            .card { background: #161b22; border-radius: 12px; padding: 12px; margin-bottom: 12px; border: 1px solid #30363d; }
             .btn-container { display: flex; gap: 10px; justify-content: center; margin-top: 10px; }
-            .btn { flex: 1; padding: 12px; font-size: 16px; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; color: white; }
+            .btn { flex: 1; padding: 14px; font-size: 16px; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; color: white; }
             .btn-buy { background-color: #238636; }
             .btn-sell { background-color: #da3633; }
-            .status { color: #3fb950; font-weight: bold; }
+            select { width: 100%; padding: 10px; background: #21262d; color: white; border: 1px solid #30363d; border-radius: 6px; font-size: 15px; }
         </style>
     </head>
     <body>
         <div class="container">
-            <h3>🤖 My Forex AI Trading Terminal</h3>
+            <h3>🤖 AI Pro Trading Terminal</h3>
             
             <div class="card">
-                <span class="status">● System Status: Live 24/7</span>
+                <span style="color:#3fb950; font-weight:bold;">● Status: Connected to Deriv Cloud Server</span>
             </div>
 
             <!-- TradingView Live Chart Widget -->
-            <div class="card" style="padding: 5px; height: 400px;">
+            <div class="card" style="padding: 5px; height: 380px;">
                 <div class="tradingview-widget-container" style="height:100%;width:100%">
                   <div id="tradingview_chart" style="height:calc(100% - 32px);width:100%"></div>
                   <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
@@ -54,24 +113,58 @@ def home():
                 </div>
             </div>
 
-            <!-- Trade Execution Control -->
+            <!-- Auto Trade Panel -->
             <div class="card">
-                <h4>⚡ Quick Trade Execution (GOLD)</h4>
+                <h4>⚡ Direct Deriv Auto-Execution</h4>
+                <select id="pairSelect">
+                    <option value="XAUUSD">GOLD (XAU/USD)</option>
+                    <option value="EURUSD">EUR/USD</option>
+                </select>
                 <div class="btn-container">
-                    <button class="btn btn-buy" onclick="alert('BUY Signal Sent to Server!')">BUY 📈</button>
-                    <button class="btn btn-sell" onclick="alert('SELL Signal Sent to Server!')">SELL 📉</button>
+                    <button class="btn btn-buy" onclick="executeTrade('BUY')">BUY 📈</button>
+                    <button class="btn btn-sell" onclick="executeTrade('SELL')">SELL 📉</button>
                 </div>
             </div>
         </div>
+
+        <script>
+            function executeTrade(action) {
+                let symbol = document.getElementById('pairSelect').value;
+                alert("Sending " + action + " order for " + symbol + " to Deriv Server...");
+                fetch('/execute-trade', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({symbol: symbol, action: action})
+                });
+            }
+        </script>
     </body>
     </html>
     """
+
+@app.route('/execute-trade', methods=['POST'])
+def execute_trade_route():
+    data = request.json
+    symbol = data.get('symbol', 'XAUUSD')
+    action = data.get('action', 'BUY')
+    
+    # Run in Background Thread so the Web App stays fast
+    threading.Thread(target=send_deriv_trade, args=(symbol, action)).start()
+    return jsonify({"status": "Execution Started"})
 
 def run_web_server():
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
 
+# Run Web Server Thread
 threading.Thread(target=run_web_server).start()
+
+# =========================================================
+# 3. YOUR TELEGRAM BOT CODE (आपका पुराना कोड नीचे ही रहेगा)
+# =========================================================
+
+# (यहाँ आपका पुराना yfinance, RSI, और Telegram bot वाला पूरा कोड रहेगा)
+
 
 # =========================================================
 # आपका Telegram Bot वाला पिछला कोड यहाँ नीचे रहेगा
