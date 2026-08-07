@@ -152,12 +152,22 @@ def execute_trade_route():
     threading.Thread(target=send_deriv_trade, args=(symbol, action)).start()
     return jsonify({"status": "Execution Started"})
 
+# =========================================================
+# SERVER AND BOT RUNNER (FIXED)
+# =========================================================
 def run_web_server():
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    # use_reloader=False से पोर्ट ब्लॉक होने का एरर खत्म हो जाएगा
+    app.run(host='0.0.0.0', port=port, use_reloader=False)
 
-# Run Web Server Thread
-threading.Thread(target=run_web_server).start()
+if __name__ == '__main__':
+    # 1. Telegram Bot को बैकग्राउंड में चलाएं
+    if 'telegram_bot_loop' in globals():
+        threading.Thread(target=telegram_bot_loop, daemon=True).start()
+    
+    # 2. Web Server को Main Thread में चलाएं
+    run_web_server()
+    
 
 # =========================================================
 # 3. YOUR TELEGRAM BOT CODE (आपका पुराना कोड नीचे ही रहेगा)
