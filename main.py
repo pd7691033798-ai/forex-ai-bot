@@ -11,7 +11,7 @@ app = Flask(__name__)
 # =========================================================
 DERIV_API_TOKEN = "YOUR_DERIV_API_TOKEN_HERE"  # 👈 यहाँ अपना Deriv API Token डालें
 APP_ID = "pat_504c2a11cdff0965d23fa7cdcc496f8ab42756562baeaca3d5a04490b29ea9a3"  # Deriv Default App ID
-.send(json.dumps(proposal_req))
+ws.send(json.dumps(proposal_req))
 
      def send_deriv_trade(symbol, trade_type, amount=10):
     print(f"👉 EXECUTION TRIGGERED FOR: {symbol} | {trade_type}", flush=True)
