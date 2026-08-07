@@ -10,7 +10,7 @@ app = Flask(__name__)
 # 1. DERIV API AUTO-TRADE CONFIGURATION
 # =========================================================
 DERIV_API_TOKEN = "YOUR_DERIV_API_TOKEN_HERE"  # 👈 यहाँ अपना Deriv API Token डालें
-APP_ID = "1089"  # Deriv Default App ID
+APP_ID = "pat_504c2a11cdff0965d23fa7cdcc496f8ab42756562baeaca3d5a04490b29ea9a3"  # Deriv Default App ID
 
 def send_deriv_trade(symbol, trade_type, amount=10):
     """
