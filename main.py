@@ -11,54 +11,59 @@ app = Flask(__name__)
 # =========================================================
 DERIV_API_TOKEN = "YOUR_DERIV_API_TOKEN_HERE"  # 👈 यहाँ अपना Deriv API Token डालें
 APP_ID = "pat_504c2a11cdff0965d23fa7cdcc496f8ab42756562baeaca3d5a04490b29ea9a3"  # Deriv Default App ID
+.send(json.dumps(proposal_req))
 
-def send_deriv_trade(symbol, trade_type, amount=10):
-    """
-    Deriv WebSockets API का उपयोग करके Auto Trade Execute करता है
-    """
+        def send_deriv_trade(symbol, trade_type, amount=10):
+    print(f"👉 EXECUTION TRIGGERED FOR: {symbol} | {trade_type}", flush=True)
+
     def on_open(ws):
-        # Step 1: Authorize with Token
-        auth_data = {"authorize": DERIV_API_TOKEN}
-        ws.send(json.dumps(auth_data))
+        print("🔗 WebSocket Connected! Authorizing Token...", flush=True)
+        ws.send(json.dumps({"authorize": DERIV_API_TOKEN}))
 
     def on_message(ws, message):
         data = json.loads(message)
-        
-        # Step 2: Auth Successful -> Send Trade Contract Proposal
+        print(f"📩 Deriv Response: {data}", flush=True)  # <-- इससे पूरा Error दिखेगा
+
         if data.get("msg_type") == "authorize":
-            print("✅ Deriv Account Authorized Successfully!")
-            
-            # Map Symbols for Deriv Forex Symbols
-            deriv_symbol = "frxXAUUSD" if "XAU" in symbol else "frxEURUSD"
-            contract_type = "CALL" if trade_type == "BUY" else "PUT"
-            
-            proposal_req = {
-                "buy": 1,
-                "price": amount,
-                "parameters": {
-                    "amount": amount,
-                    "basis": "stake",
-                    "contract_type": contract_type,
-                    "currency": "USD",
-                    "duration": 5,
-                    "duration_unit": "m",  # 5 Minute Trade Duration
-                    "symbol": deriv_symbol
-                }
-            }
-            ws.send(json.dumps(proposal_req))
+            if "error" in data:
+                print(f"❌ AUTH ERROR: {data['error']['message']}", flush=True)
+                ws.close()
+            else:
+                print("✅ Token Authorized! Sending Order Proposal...", flush=True)
+                deriv_symbol = "frxXAUUSD" if "XAU" in symbol else "frxEURUSD"
+                contract_type = "CALL" if trade_type == "BUY" else "PUT"
+                ws.send(json.dumps({
+                    "buy": 1, 
+                    "price": amount,
+                    "parameters": {
+                        "amount": amount, 
+                        "basis": "stake",
+                        "contract_type": contract_type, 
+                        "currency": "USD",
+                        "duration": 5, 
+                        "duration_unit": "m", 
+                        "symbol": deriv_symbol
+                    }
+                }))
 
-        # Step 3: Trade Order Executed Response
         elif data.get("msg_type") == "buy":
-            print(f"🚀 TRADE EXECUTED SUCCESSFULLY: {data.get('buy', {}).get('transaction_id')}")
-            ws.close()
-            
-        elif "error" in data:
-            print(f"❌ Deriv Trade Error: {data['error']['message']}")
+            if "error" in data:
+                print(f"❌ TRADE ERROR: {data['error']['message']}", flush=True)
+            else:
+                print(f"🚀 SUCCESS! Trade Placed. ID: {data['buy']['transaction_id']}", flush=True)
             ws.close()
 
-    ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
-    ws = websocket.WebSocketApp(ws_url, on_open=on_open, on_message=on_message)
+    def on_error(ws, error):
+        print(f"⚠️ WS ERROR: {error}", flush=True)
+
+    ws = websocket.WebSocketApp(
+        f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}",
+        on_open=on_open, 
+        on_message=on_message,
+        on_error=on_error
+    )
     ws.run_forever()
+
 
 # =========================================================
 # 2. WEB INTERFACE (Trading Terminal + TradingView Chart)
