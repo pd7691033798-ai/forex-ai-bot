@@ -1,5 +1,48 @@
 import os
 import threading
+from flask import Flask
+
+# 1. Web Server for App & UptimeRobot
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Forex AI Bot</title>
+        <style>
+            body { font-family: Arial, sans-serif; background: #0f172a; color: white; text-align: center; padding: 20px; }
+            .card { background: #1e293b; padding: 20px; border-radius: 12px; margin-top: 20px; border: 1px solid #334155; }
+            .status { color: #22c55e; font-weight: bold; }
+        </style>
+    </head>
+    <body>
+        <h1>🤖 Forex AI Bot Dashboard</h1>
+        <div class="card">
+            <h3>⚡ System Status</h3>
+            <p class="status">● Running Live 24/7</p>
+            <p>Telegram Signals & Auto Trader: ACTIVE</p>
+        </div>
+    </body>
+    </html>
+    """
+
+def run_web_server():
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
+
+# Background में Web Server चालू करें
+threading.Thread(target=run_web_server).start()
+
+# ---------------------------------------------------------
+# 2. इसके नीचे आपका पुराना main.py का Telegram Bot वाला Code रहेगा
+# ---------------------------------------------------------
+
+import os
+import threading
 import time
 from datetime import datetime, timezone
 import numpy as np
