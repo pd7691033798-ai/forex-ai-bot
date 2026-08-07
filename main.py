@@ -2,6 +2,85 @@ import os
 import threading
 from flask import Flask
 
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Forex AI Super App</title>
+        <style>
+            body { font-family: 'Segoe UI', Arial, sans-serif; background-color: #0d1117; color: #c9d1d9; margin: 0; padding: 10px; text-align: center; }
+            .container { max-width: 600px; margin: 0 auto; }
+            .card { background: #161b22; border-radius: 12px; padding: 12px; margin-bottom: 15px; border: 1px solid #30363d; }
+            .btn-container { display: flex; gap: 10px; justify-content: center; margin-top: 10px; }
+            .btn { flex: 1; padding: 12px; font-size: 16px; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; color: white; }
+            .btn-buy { background-color: #238636; }
+            .btn-sell { background-color: #da3633; }
+            .status { color: #3fb950; font-weight: bold; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h3>🤖 My Forex AI Trading Terminal</h3>
+            
+            <div class="card">
+                <span class="status">● System Status: Live 24/7</span>
+            </div>
+
+            <!-- TradingView Live Chart Widget -->
+            <div class="card" style="padding: 5px; height: 400px;">
+                <div class="tradingview-widget-container" style="height:100%;width:100%">
+                  <div id="tradingview_chart" style="height:calc(100% - 32px);width:100%"></div>
+                  <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+                  <script type="text/javascript">
+                  new TradingView.widget({
+                  "autosize": true,
+                  "symbol": "OANDA:XAUUSD",
+                  "interval": "15",
+                  "timezone": "Asia/Kolkata",
+                  "theme": "dark",
+                  "style": "1",
+                  "locale": "en",
+                  "enable_publishing": false,
+                  "hide_side_toolbar": false,
+                  "container_id": "tradingview_chart"
+                });
+                  </script>
+                </div>
+            </div>
+
+            <!-- Trade Execution Control -->
+            <div class="card">
+                <h4>⚡ Quick Trade Execution (GOLD)</h4>
+                <div class="btn-container">
+                    <button class="btn btn-buy" onclick="alert('BUY Signal Sent to Server!')">BUY 📈</button>
+                    <button class="btn btn-sell" onclick="alert('SELL Signal Sent to Server!')">SELL 📉</button>
+                </div>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+def run_web_server():
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
+
+threading.Thread(target=run_web_server).start()
+
+# =========================================================
+# आपका Telegram Bot वाला पिछला कोड यहाँ नीचे रहेगा
+# =========================================================
+
+import os
+import threading
+from flask import Flask
+
 # 1. Web Server for App & UptimeRobot
 app = Flask(__name__)
 
