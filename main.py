@@ -1,235 +1,232 @@
 import os
-import threading
-import json
 import time
+import json
+import asyncio
+import logging
+import datetime
 import requests
-import websocket
-import yfinance as yf
-import pandas as pd
-import numpy as np
-from sklearn.ensemble import RandomForestClassifier
-from flask import Flask, request, jsonify
+import websockets
+from typing import Dict, Any
 
-app = Flask(__name__)
+# Logging Setup
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 
-# =========================================================
-# 1. CONFIGURATION (यहाँ अपनी सही डिटेल्स भरें)
-# =========================================================
-DERIV_API_TOKEN =  "pat_89e4df8ec1147df432ee86dae0e74b9f05c90819de66c69471c7882c082dca35"
-# 👈 अपना Deriv API Token डालें
-APP_ID = "63483"                                 # 👈 Deriv Numeric App ID (1089 Standard है)
+# -------------------------------------------------------------
+# 1. CONFIGURATION & CREDENTIALS
+# -------------------------------------------------------------
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8767606359:AAH7dZn_9dsT1HwmOkbvKAB2bgB2aEvOz0c")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6449682719")
 
-TELEGRAM_BOT_TOKEN = "8767606359:AAH7dZn_9dsT1HwmOkbvKAB2bgB2aEvOz0c"  # 👈 अपना Telegram Bot Token लिखें
-TELEGRAM_CHAT_ID = "6449682719"      # 👈 अपना Telegram Chat ID लिखें
+# Updated Custom Deriv App ID
+DERIV_APP_ID = os.getenv("DERIV_APP_ID", "68423")  
+DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "pat_89e4df8ec1147df432ee86dae0e74b9f05c90819de66c69471c7882c082dca35")
 
-# =========================================================
-# 2. TELEGRAM ALERT SENDER
-# =========================================================
-def send_telegram_message(message):
+# -------------------------------------------------------------
+# 2. PHASE 1 CAPITAL SAFETY & STEALTH ENGINE
+# -------------------------------------------------------------
+class Phase1CapitalGuardian:
+    def __init__(self, initial_balance: float = 10000.0, max_daily_loss_pct: float = 3.0, risk_per_trade_pct: float = 1.0):
+        self.initial_balance = initial_balance
+        self.current_balance = initial_balance
+        self.equity = initial_balance
+        self.daily_start_balance = initial_balance
+        
+        self.max_daily_loss_pct = max_daily_loss_pct
+        self.risk_per_trade_pct = risk_per_trade_pct
+        
+        self.consecutive_losses = 0
+        self.max_consecutive_losses = 3
+        self.circuit_breaker_active = False
+        self.circuit_breaker_until = None
+        self.kill_switch_activated = False
+
+        # Stealth Mode: Stop-Loss & Take-Profit Memory Storage
+        self.phantom_positions: Dict[str, Dict[str, Any]] = {}
+
+    def calculate_dynamic_lot(self, stop_loss_pips: float, pip_value: float = 10.0) -> float:
+        if stop_loss_pips <= 0:
+            return 0.01
+        risk_amount = self.current_balance * (self.risk_per_trade_pct / 100.0)
+        lot_size = risk_amount / (stop_loss_pips * pip_value)
+        return round(max(0.01, lot_size), 2)
+
+    def check_safety_guards(self) -> tuple[bool, str]:
+        """ट्रेड लेने से पहले सुरक्षा जांच"""
+        if self.kill_switch_activated:
+            return False, "🚨 Emergency Kill Switch Active!"
+
+        if self.circuit_breaker_active:
+            if datetime.datetime.utcnow() < self.circuit_breaker_until:
+                return False, f"⚡ Circuit Breaker Active until {self.circuit_breaker_until.strftime('%H:%M UTC')}"
+            else:
+                self.circuit_breaker_active = False
+                self.consecutive_losses = 0
+
+        daily_loss = (self.daily_start_balance - self.equity) / self.daily_start_balance * 100.0
+        if daily_loss >= self.max_daily_loss_pct:
+            return False, f"🛡️ Daily Equity Guardian Triggered! Loss: {daily_loss:.2f}% >= {self.max_daily_loss_pct}%"
+
+        return True, "🟢 Safety Guards Clear"
+
+    def register_trade_result(self, is_win: bool, pnl: float):
+        self.equity += pnl
+        self.current_balance += pnl
+
+        if is_win:
+            self.consecutive_losses = 0
+        else:
+            self.consecutive_losses += 1
+            logging.warning(f"Trade Loss recorded. Consecutive Losses: {self.consecutive_losses}")
+
+        if self.consecutive_losses >= self.max_consecutive_losses:
+            self.circuit_breaker_active = True
+            self.circuit_breaker_until = datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+            logging.critical(f"Circuit Breaker Activated! 3 consecutive losses.")
+
+# Global Phase 1 Instance
+guardian = Phase1CapitalGuardian()
+
+# -------------------------------------------------------------
+# 3. TELEGRAM SENDER FUNCTION
+# -------------------------------------------------------------
+def send_telegram_message(message: str):
+    """टेलीग्राम संदेश भेजने के लिए फ़ंक्शन"""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        data = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
-        requests.post(url, data=data, timeout=10)
-        print("📲 Telegram Alert Sent Successfully!", flush=True)
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "Markdown"
+        }
+        response = requests.post(url, json=payload, timeout=5)
+        return response.json()
     except Exception as e:
-        print(f"⚠️ Telegram Error: {e}", flush=True)
+        logging.error(f"Telegram Message Failed: {e}")
+        return None
 
-# =========================================================
-# 3. DERIV AUTO-TRADE EXECUTION
-# =========================================================
-def send_deriv_trade(symbol, trade_type, amount=10):
-    print(f"👉 EXECUTION TRIGGERED FOR: {symbol} | {trade_type}", flush=True)
-
-    def on_open(ws):
-        print("🔗 WebSocket Connected! Authorizing...", flush=True)
-        ws.send(json.dumps({"authorize": DERIV_API_TOKEN}))
-
-    def on_message(ws, message):
-        data = json.loads(message)
-        print(f"📩 Deriv Response: {data}", flush=True)
-
-        if data.get("msg_type") == "authorize":
-            if "error" in data:
-                print(f"❌ AUTH ERROR: {data['error']['message']}", flush=True)
-                send_telegram_message(f"❌ <b>Deriv Auth Failure:</b> {data['error']['message']}")
-                ws.close()
-            else:
-                print("✅ Authorized! Sending Proposal...", flush=True)
-                deriv_symbol = "frxXAUUSD" if "XAU" in symbol else "frxEURUSD"
-                contract_type = "CALL" if trade_type == "BUY" else "PUT"
-                
-                proposal_req = {
-                    "buy": 1, 
-                    "price": amount,
-                    "parameters": {
-                        "amount": amount, 
-                        "basis": "stake",
-                        "contract_type": contract_type, 
-                        "currency": "USD",
-                        "duration": 5, 
-                        "duration_unit": "m", 
-                        "symbol": deriv_symbol
-                    }
-                }
-                ws.send(json.dumps(proposal_req))
-
-        elif data.get("msg_type") == "buy":
-            if "error" in data:
-                print(f"❌ TRADE ERROR: {data['error']['message']}", flush=True)
-                send_telegram_message(f"❌ <b>Trade Exec Failed:</b> {data['error']['message']}")
-            else:
-                trade_id = data['buy']['transaction_id']
-                print(f"🚀 SUCCESS! Trade Placed ID: {trade_id}", flush=True)
-                send_telegram_message(f"🚀 <b>Auto-Trade Executed!</b>\n\n<b>Symbol:</b> {symbol}\n<b>Action:</b> {trade_type}\n<b>Trade ID:</b> {trade_id}")
-            ws.close()
-
-    def on_error(ws, error):
-        print(f"⚠️ WS ERROR: {error}", flush=True)
-
-    ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
-    ws = websocket.WebSocketApp(ws_url, on_open=on_open, on_message=on_message, on_error=on_error)
-    ws.run_forever()
-
-# =========================================================
-# 4. ML MACHINE LEARNING & VOLATILITY SHIELD ANALYSIS
-# =========================================================
-def analyze_with_ml():
-    print("📊 Fetching Market Data & Training ML Model...", flush=True)
-    try:
-        ticker = yf.Ticker("GC=F")
-        df = ticker.history(period="5d", interval="5m")
-        if df.empty or len(df) < 50:
-            return
-
-        df['Returns'] = df['Close'].pct_change()
-        delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
-
-        df['High_Low'] = df['High'] - df['Low']
-        df['ATR'] = df['High_Low'].rolling(window=14).mean()
-        df['SMA_20'] = df['Close'].rolling(window=20).mean()
-
-        df['Target'] = 0
-        df.loc[(df['RSI'] < 35) & (df['Close'] > df['SMA_20']), 'Target'] = 1
-        df.loc[(df['RSI'] > 65) & (df['Close'] < df['SMA_20']), 'Target'] = -1
-
-        df = df.dropna()
-        X = df[['RSI', 'ATR', 'Returns', 'High_Low']]
-        y = df['Target']
-
-        if len(X) < 20:
-            return
-
-        model = RandomForestClassifier(n_estimators=50, random_state=42)
-        model.fit(X, y)
-
-        latest_features = X.iloc[[-1]]
-        prediction = model.predict(latest_features)[0]
-
-        last_price = df['Close'].iloc[-1]
-        current_rsi = df['RSI'].iloc[-1]
-        current_atr = df['ATR'].iloc[-1]
-        avg_atr = df['ATR'].mean()
-
-        # Volatility Shield (News/War Protection)
-        is_high_volatility = current_atr > (avg_atr * 2.5)
-        if is_high_volatility:
-            send_telegram_message(f"🚨 <b>NEWS/WAR SHIELD ACTIVE (GOLD)</b>\nPrice: ${last_price:.2f}\nVolatility Spike Detected! Auto-Trades Paused.")
-            return
-
-        signal = "HOLD"
-        if prediction == 1:
-            signal = "BUY"
-        elif prediction == -1:
-            signal = "SELL"
-
-        msg = f"🧠 <b>SUPER BOT ML REPORT (GOLD)</b>\nPrice: ${last_price:.2f}\nRSI: {current_rsi:.1f}\nATR: {current_atr:.2f}\nML Signal: <b>{signal}</b>"
-        send_telegram_message(msg)
-
-        if signal in ["BUY", "SELL"]:
-            send_deriv_trade("XAUUSD", signal)
-
-    except Exception as e:
-        print(f"⚠️ ML Engine Error: {e}", flush=True)
-
-# =========================================================
-# 5. BACKGROUND ENGINE LOOP
-# =========================================================
-def telegram_bot_loop():
-    print("🤖 Super Bot Background Loop Active...", flush=True)
-    send_telegram_message("🤖 <b>Super Bot Online!</b>\nMachine Learning Analysis & Volatility Shield Active.")
+# -------------------------------------------------------------
+# 4. DERIV TRADE EXECUTION (PHASE 1 INTEGRATED)
+# -------------------------------------------------------------
+async def execute_deriv_trade(symbol: str, contract_type: str, amount: float, duration: int, stealth_sl: float, stealth_tp: float):
+    """Phase 1 Guard से होकर जाने वाला ट्रेड फ़ंक्शन"""
     
+    # STEP 1: Phase 1 Safety Check
+    is_safe, reason = guardian.check_safety_guards()
+    if not is_safe:
+        logging.warning(f"Trade Blocked: {reason}")
+        send_telegram_message(f"🚫 *Trade Rejected by Phase 1*\nReason: {reason}")
+        return
+
+    # STEP 2: Deriv WebSocket Connection with Custom App ID (68423)
+    ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
+    
+    try:
+        async with websockets.connect(ws_url) as ws:
+            # Authorize
+            await ws.send(json.dumps({"authorize": DERIV_API_TOKEN}))
+            auth_res = json.loads(await ws.recv())
+            
+            if "error" in auth_res:
+                send_telegram_message(f"❌ *Deriv Auth Error:* `{auth_res['error']['message']}`")
+                return
+
+            # Buy Request
+            buy_req = {
+                "buy": 1,
+                "price": amount,
+                "parameters": {
+                    "amount": amount,
+                    "basis": "stake",
+                    "contract_type": contract_type,  # CALL / PUT
+                    "currency": "USD",
+                    "duration": duration,
+                    "duration_unit": "m",
+                    "symbol": symbol
+                }
+            }
+            await ws.send(json.dumps(buy_req))
+            buy_res = json.loads(await ws.recv())
+
+            if "buy" in buy_res:
+                contract_id = str(buy_res["buy"]["contract_id"])
+
+                # Stealth SL/TP Memory Tracking
+                guardian.phantom_positions[contract_id] = {
+                    "symbol": symbol,
+                    "type": contract_type,
+                    "sl": stealth_sl,
+                    "tp": stealth_tp
+                }
+
+                send_telegram_message(
+                    f"✅ *Trade Placed on Deriv*\n"
+                    f"• Symbol: `{symbol}`\n"
+                    f"• Type: `{contract_type}`\n"
+                    f"• Stake: `${amount}`\n"
+                    f"• Order ID: `{contract_id}`\n"
+                    f"🛡️ *Phantom SL/TP Active in Memory*"
+                )
+            else:
+                send_telegram_message(f"❌ *Order Execution Failed:* `{buy_res.get('error', {}).get('message')}`")
+
+    except Exception as e:
+        logging.error(f"Deriv Connection Error: {e}")
+        send_telegram_message(f"🚨 *Execution Exception:* `{str(e)}`")
+
+# -------------------------------------------------------------
+# 5. 10-MINUTE TELEGRAM HEARTBEAT LOOP
+# -------------------------------------------------------------
+async def periodic_telegram_heartbeat():
+    """हर 10 मिनट में Telegram पर स्टेटस अपडेट भेजेगा"""
     while True:
         try:
-            analyze_with_ml()
-            time.sleep(600)  # हर 10 मिनट पर चेक करेगा
+            is_safe, safety_msg = guardian.check_safety_guards()
+            cb_status = "🔴 ACTIVE" if guardian.circuit_breaker_active else "🟢 NORMAL"
+            
+            status_text = (
+                f"💓 *SuperBot 10-Min Heartbeat Update*\n"
+                f"─────────────────────────────\n"
+                f"💵 *Balance:* `${guardian.current_balance:.2f}`\n"
+                f"📈 *Equity:* `${guardian.equity:.2f}`\n"
+                f"🛡️ *Phase 1 Guard:* {safety_msg}\n"
+                f"⚡ *Circuit Breaker:* {cb_status}\n"
+                f"👻 *Active Stealth Positions:* {len(guardian.phantom_positions)}\n"
+                f"📱 *Deriv App ID:* `{DERIV_APP_ID}`\n"
+                f"⏰ *Server Time:* `{datetime.datetime.utcnow().strftime('%H:%M:%S UTC')}`"
+            )
+            
+            # टेलीग्राम पर संदेश भेजें
+            send_telegram_message(status_text)
+            
         except Exception as e:
-            print(f"⚠️ Loop Error: {e}", flush=True)
-            time.sleep(30)
+            logging.error(f"Heartbeat Error: {e}")
 
-# =========================================================
-# 6. WEB INTERFACE & RUNNER
-# =========================================================
-@app.route('/')
-def home():
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Super Bot Dashboard</title>
-        <style>
-            body { background: #0d1117; color: white; text-align: center; font-family: sans-serif; padding: 20px; }
-            .card { background: #161b22; padding: 20px; border-radius: 10px; border: 1px solid #30363d; margin-bottom: 20px; }
-            .btn { width: 45%; padding: 15px; margin: 5px; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; color: white; }
-            .btn-buy { background: #238636; }
-            .btn-sell { background: #da3633; }
-        </style>
-    </head>
-    <body>
-        <h2>🤖 Super Bot Control Center</h2>
-        <div class="card">
-            <h4>Select Market</h4>
-            <select id="symbolSelect" style="padding: 10px; width: 80%; background: #21262d; color: white; border-radius: 5px;">
-                <option value="XAUUSD">GOLD (XAU/USD)</option>
-                <option value="EURUSD">EUR/USD</option>
-            </select>
-        </div>
-        <div class="card">
-            <h4>Manual Trade Override</h4>
-            <button class="btn btn-buy" onclick="triggerTrade('BUY')">BUY 📈</button>
-            <button class="btn btn-sell" onclick="triggerTrade('SELL')">SELL 📉</button>
-        </div>
-        <script>
-            function triggerTrade(action) {
-                let symbol = document.getElementById('symbolSelect').value;
-                alert("Sending " + action + " order for " + symbol + "...");
-                fetch('/execute-trade', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({symbol: symbol, action: action})
-                });
-            }
-        </script>
-    </body>
-    </html>
-    """
+        # 10 मिनट (600 सेकंड) का इंतजार
+        await asyncio.sleep(600)
 
-@app.route('/execute-trade', methods=['POST'])
-def execute_trade_route():
-    data = request.json
-    symbol = data.get('symbol', 'XAUUSD')
-    action = data.get('action', 'BUY')
-    threading.Thread(target=send_deriv_trade, args=(symbol, action)).start()
-    return jsonify({"status": "Request Sent"})
+# -------------------------------------------------------------
+# 6. MAIN APPLICATION ENTRY POINT
+# -------------------------------------------------------------
+async def main():
+    logging.info(f"🚀 Starting Phase 1 Merged SuperBot Engine with App ID: {DERIV_APP_ID}...")
+    
+    # बोट स्टार्ट होने पर टेलीग्राम पर पहला मैसेज भेजेगा
+    send_telegram_message(
+        f"🤖 *SuperBot Phase 1 Engine Started on Render!*\n"
+        f"─────────────────────────────\n"
+        f"• Deriv App ID: `{DERIV_APP_ID}` (Configured)\n"
+        f"• Capital Guard (1% Risk Limit): Active\n"
+        f"• Stealth Phantom SL: Active\n"
+        f"• 10-Min Heartbeat Loop: Active"
+    )
 
-def run_web_server():
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, use_reloader=False)
+    # 10 मिनट वाले बैकग्राउंड लूप को स्टार्ट करें
+    asyncio.create_task(periodic_telegram_heartbeat())
 
-if __name__ == '__main__':
-    threading.Thread(target=telegram_bot_loop, daemon=True).start()
-    run_web_server()
+    # Render पर बोट को 24/7 एक्टिव रखने के लिए लूप
+    while True:
+        await asyncio.sleep(1)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+            
