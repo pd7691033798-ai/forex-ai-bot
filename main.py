@@ -66,7 +66,7 @@ class Phase1CapitalGuardian:
         # Stealth Mode: Stop-Loss & Take-Profit Memory Storage
         self.phantom_positions: Dict[str, Dict[str, Any]] = {}
 
-    def get_1pct_stake_amount(() -> float:
+    def get_1pct_stake_amount(self) -> float:
         """1% Risk Rule के अनुसार सटीक स्टेक (Stake) राशि निकालना"""
         stake = self.current_balance * (self.risk_per_trade_pct / 100.0)
         return round(max(1.0, stake), 2)  # Minimum $1 stake limit
