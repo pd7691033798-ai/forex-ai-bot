@@ -6,9 +6,33 @@ import logging
 import datetime
 import requests
 import websockets
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any
 
-# Logging Setup
+# -------------------------------------------------------------
+# 0. RENDER HEALTH CHECK SERVER (Port Binding Fix)
+# -------------------------------------------------------------
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"SuperBot is Live and Running!")
+
+    def log_message(self, format, *args):
+        return  # Render के हेल्थ चेक लॉग्स को ब्लॉक करने के लिए
+
+def start_dummy_web_server():
+    """Render को पोर्ट दिखाने के लिए बैकग्राउंड वेब सर्वर"""
+    port = int(os.getenv("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    logging.info(f"🌐 Dummy Health Check Server listening on port {port}")
+    server.serve_forever()
+
+# -------------------------------------------------------------
+# LOGGING SETUP
+# -------------------------------------------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 
 # -------------------------------------------------------------
@@ -210,6 +234,9 @@ async def periodic_telegram_heartbeat():
 async def main():
     logging.info(f"🚀 Starting Phase 1 Merged SuperBot Engine with App ID: {DERIV_APP_ID}...")
     
+    # Render के लिए Background Thread में Dummy Web Server चालू करें
+    threading.Thread(target=start_dummy_web_server, daemon=True).start()
+
     # बोट स्टार्ट होने पर टेलीग्राम पर पहला मैसेज भेजेगा
     send_telegram_message(
         f"🤖 *SuperBot Phase 1 Engine Started on Render!*\n"
@@ -229,4 +256,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-            
+    
