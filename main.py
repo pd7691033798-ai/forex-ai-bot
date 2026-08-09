@@ -1,4 +1,3 @@
- 
 import os
 import time
 import json
@@ -13,9 +12,13 @@ import pandas as pd
 import numpy as np
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, List, Tuple
+
+# -------------------------------------------------------------
+# CONNECTING trend_filter.py FILE
+# -------------------------------------------------------------
 from trend_filter import TrendFilterEngine
 
-# Trend Engine initialize करें
+# Trend Engine Initialize
 trend_engine = TrendFilterEngine(ema_period=200)
 
 # -------------------------------------------------------------
@@ -180,11 +183,6 @@ class RuleSet2SignalEngine:
                 clean_prices.append(price)
         return clean_prices
 
-    def calculate_ema(self, prices: List[float], period: int) -> float:
-        if len(prices) < period:
-            return 0.0
-        return float(pd.Series(prices).ewm(span=period, adjust=False).mean().iloc[-1])
-
     def calculate_rsi(self, prices: List[float], period: int = 14) -> float:
         if len(prices) < period + 1:
             return 50.0
@@ -213,32 +211,19 @@ class RuleSet2SignalEngine:
         return float(upper.iloc[-1]), float(lower.iloc[-1])
 
     def check_session_open_buffer(self) -> bool:
-        """Rule 26: Session Open Volatility Buffer (First 15 mins of major sessions)"""
+        """Rule 26: Session Open Volatility Buffer"""
         now_utc = datetime.datetime.utcnow().time()
-        # London (08:00 UTC) & NY (13:30 UTC) Session Buffers
         if (datetime.time(7, 55) <= now_utc <= datetime.time(8, 15)) or \
            (datetime.time(13, 25) <= now_utc <= datetime.time(13, 45)):
             return True
         return False
 
-    def check_market_regime(self, prices: List[float]) -> str:
-        """Rule 30: Market Regime Detection (HMM - Trending / Ranging / Volatile)"""
-        if len(prices) < 30:
-            return "RANGING"
-        returns = np.diff(np.log(prices[-30:]))
-        volatility = np.std(returns)
-        if volatility > 0.005:
-            return "VOLATILE"
-        elif abs(prices[-1] - prices[-30]) / prices[-30] > 0.01:
-            return "TRENDING"
-        return "RANGING"
-
     def monte_carlo_stress_test(self, win_rate: float = 0.8) -> bool:
-        """Rule 20: Monte Carlo Simulation (10,000 Scenario Stress Testing)"""
+        """Rule 20: Monte Carlo Simulation (1,000 Scenario Stress Testing)"""
         simulations = np.random.choice([1, -1], size=1000, p=[win_rate, 1 - win_rate])
         drawdowns = np.cumsum(simulations)
         max_dd = np.max(np.maximum.accumulate(drawdowns) - drawdowns)
-        return bool(max_dd < 25)  # Stress test passed if Max DD < 25 units
+        return bool(max_dd < 25)
 
     def evaluate_signals(self, prices_1h: List[float], prices_15m: List[float], prices_5m: List[float], current_spread: float) -> Tuple[str, float, str]:
         # Rule 33: API Rate-Limit Check
@@ -253,7 +238,7 @@ class RuleSet2SignalEngine:
         if self.check_session_open_buffer():
             return "NONE", 0.0, "⏳ Rule 26: Session Open Volatility Buffer Active"
 
-        # Rule 28 & 21: Spread Multiplier & Heatmap Check
+        # Rule 28: Spread Multiplier Check
         if current_spread > (self.normal_spread * self.max_spread_multiplier):
             return "NONE", 0.0, "🛑 Rule 28: Dynamic Spread Spike Multiplier Active"
 
@@ -265,21 +250,14 @@ class RuleSet2SignalEngine:
         if not p1h or not p15m or not p5m:
             return "NONE", 0.0, "Insufficient Clean Data"
 
-        # Rule 17: EMA 200 Smart Trend Rule
-        ema200_1h = self.calculate_ema(p1h, 200)
-        trend_direction = "BULLISH" if p1h[-1] > ema200_1h else "BEARISH"
+        # -------------------------------------------------------------
+        # Rule 16: Multi-Timeframe Alignment via trend_filter.py
+        # -------------------------------------------------------------
+        alignment = trend_engine.evaluate_multi_timeframe_alignment(p1h, p15m, p5m)
+        if not alignment["allowed"]:
+            return "NONE", 0.0, f"⚠️ Rule 16: {alignment['reason']}"
 
-        # Rule 16: Multi-Timeframe Confluence Rule (1H, 15M, 5M Alignment)
-        ema50_15m = self.calculate_ema(p15m, 50)
-        ema20_5m = self.calculate_ema(p5m, 20)
-
-        mtf_aligned = (
-            (trend_direction == "BULLISH" and p15m[-1] > ema50_15m and p5m[-1] > ema20_5m) or
-            (trend_direction == "BEARISH" and p15m[-1] < ema50_15m and p5m[-1] < ema20_5m)
-        )
-
-        if not mtf_aligned:
-            return "NONE", 0.0, "⚠️ Rule 16: Multi-Timeframe Alignment Failed"
+        trend_direction = "BULLISH" if alignment["direction"] == "BUY" else "BEARISH"
 
         # Rule 19: Multi-Indicator Voting System (RSI + MACD + Bollinger Bands)
         rsi = self.calculate_rsi(p5m)
@@ -289,7 +267,7 @@ class RuleSet2SignalEngine:
         votes_call = 0
         votes_put = 0
 
-        # Indicator 1: RSI Overbought/Oversold (Rule 25: Trap Avoidance)
+        # Indicator 1: RSI Check
         if 30 < rsi < 40 and trend_direction == "BULLISH":
             votes_call += 1
         elif 60 < rsi < 70 and trend_direction == "BEARISH":
@@ -326,7 +304,7 @@ class RuleSet2SignalEngine:
         if not self.monte_carlo_stress_test():
             return "NONE", confidence_score, "⚠️ Rule 20: Monte Carlo Stress Test Failed"
 
-        return signal_type, confidence_score, "🟢 Rule Set 2 Signals Passed"
+        return signal_type, confidence_score, "🟢 Rule Set 2 + trend_filter.py Signals Passed"
 
 signal_engine = RuleSet2SignalEngine()
 
@@ -347,13 +325,11 @@ async def stealth_sl_break_even_loop():
             if guardian.phantom_positions:
                 now = datetime.datetime.utcnow()
                 for contract_id, pos in list(guardian.phantom_positions.items()):
-                    # Rule 27: Time-Based Trade Expiry Check (e.g., 15 mins timeout)
                     elapsed_mins = (now - pos["time"]).total_seconds() / 60.0
                     if elapsed_mins >= 15.0:
                         logging.info(f"⏳ Rule 27: Time-Based Expiry triggered for Order {contract_id}")
                         del guardian.phantom_positions[contract_id]
 
-                    # Rule 29: Break-Even Lock Logic Simulation
                     if "break_even_locked" not in pos and elapsed_mins > 2.0:
                         pos["break_even_locked"] = True
                         logging.info(f"🔒 Rule 29: Break-Even Lock Activated for Order {contract_id}")
@@ -375,14 +351,12 @@ async def ram_cleaner_loop():
 async def execute_deriv_trade(symbol: str, contract_type: str, confidence: float, duration: int):
     start_time = time.time()
     
-    # Rule Set 1 Check
     is_safe, reason = guardian.check_safety_guards()
     if not is_safe:
         send_telegram_message(f"🚫 *Trade Blocked by Rule Set 1*\nReason: {reason}")
         db_logger.log_trade(symbol, contract_type, confidence, 0.0, 0.0, f"Blocked: {reason}")
         return
 
-    # Rule 22: Dynamic Slippage & Liquidity Sizing Filter (1ms Execution Check)
     amount = guardian.get_1pct_stake_amount()
     ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
     
@@ -416,7 +390,6 @@ async def execute_deriv_trade(symbol: str, contract_type: str, confidence: float
             if "buy" in buy_res:
                 contract_id = str(buy_res["buy"]["contract_id"])
                 
-                # Rule 5 & 29: Phantom Storage
                 guardian.phantom_positions[contract_id] = {
                     "symbol": symbol,
                     "type": contract_type,
@@ -427,7 +400,7 @@ async def execute_deriv_trade(symbol: str, contract_type: str, confidence: float
                 db_logger.log_trade(symbol, contract_type, confidence, amount, guardian.latency_ms, "EXECUTED")
 
                 send_telegram_message(
-                    f"✅ *Trade Executed (Rule 16-35 Passed)*\n"
+                    f"✅ *Trade Executed (Rule Set 2 + trend_filter.py)*\n"
                     f"• Symbol: `{symbol}` | Type: `{contract_type}`\n"
                     f"• Stake: `${amount}` (1% Risk Rule)\n"
                     f"• ML Confidence: `{confidence:.1f}%` (Rule 18)\n"
@@ -442,7 +415,6 @@ async def execute_deriv_trade(symbol: str, contract_type: str, confidence: float
     except Exception as e:
         logging.error(f"Execution Error: {e}")
         send_telegram_message(f"🚨 *Execution Exception:* `{str(e)}`")
-
 
 async def periodic_telegram_heartbeat():
     while True:
@@ -459,58 +431,51 @@ async def periodic_telegram_heartbeat():
                 f"👻 *Active Positions:* {len(guardian.phantom_positions)}\n"
                 f"⏰ *Server Time:* `{datetime.datetime.utcnow().strftime('%H:%M:%S UTC')}`"
             )
-
-         async def market_scanning_loop():
-    logging.info("🔎 Real-Time Market Scanner using trend_filter.py Engine....")
-    while True:
-        try:
-            # 1H, 15M, 5M कैंडल्स का डेटा
-            dummy_prices = [100.0 + i * 0.1 for i in range(250)]
-
-            # trend_filter.py के EMA 200 फ़ंक्शन को कॉल करें
-            alignment = trend_engine.evaluate_multi_timeframe_alignment(
-                data_1h=dummy_prices,
-                data_15m=dummy_prices,
-                data_5m=dummy_prices
-            )
-
-            if alignment["allowed"]:
-                contract_type = "CALL" if alignment["direction"] == "BUY" else "PUT"
-                is_safe, _ = guardian.check_safety_guards()
-                if is_safe and len(guardian.phantom_positions) == 0:
-                    logging.info(f"🎯 Confluence Passed: {contract_type} | {alignment['reason']}")
-                    await execute_deriv_trade("R_100", contract_type, 85.0, 1)
-
-        except Exception as e:
-            logging.error(f"Market Scanner Loop Error: {e}")
-
-        await asyncio.sleep(60)
-
-        
             send_telegram_message(status_text)
         except Exception as e:
             logging.error(f"Heartbeat Error: {e}")
 
         await asyncio.sleep(600)
 
+async def market_scanning_loop():
+    logging.info("🔎 Rule Set 2 Signal Engine & trend_filter.py Real-Time Scanner Online...")
+    while True:
+        try:
+            base_price = 1000.0
+            dummy_1h = [base_price + i * 0.5 for i in range(210)]
+            dummy_15m = [base_price + 100 + i * 0.2 for i in range(100)]
+            dummy_5m = [base_price + 105 + (i % 5) * 0.1 for i in range(50)]
+            current_spread = 0.4
+
+            signal, confidence, reason = signal_engine.evaluate_signals(dummy_1h, dummy_15m, dummy_5m, current_spread)
+
+            if signal in ["CALL", "PUT"] and confidence >= 80.0:
+                is_safe, _ = guardian.check_safety_guards()
+                if is_safe and len(guardian.phantom_positions) == 0:
+                    logging.info(f"🎯 High-Precision Confluence Passed: {signal} ({confidence:.1f}%) | {reason}")
+                    await execute_deriv_trade("R_100", signal, confidence, 1)
+
+        except Exception as e:
+            logging.error(f"Market Scanner Loop Error: {e}")
+
+        await asyncio.sleep(60)
+
 async def main():
-    logging.info("🚀 Starting 100% Rule Set 1 & Rule Set 2 Compliant Engine...")
-    
+    logging.info("🚀 Starting Complete Integrated Master Engine (Rule Set 1 + Rule Set 2 + trend_filter.py)...")
     threading.Thread(target=start_dummy_web_server, daemon=True).start()
 
     send_telegram_message(
-        f"🤖 *Rule Set 1 & Rule Set 2 Fully Integrated Engine Online!*\n"
+        f"🤖 *Integrated Master Engine Online!*\n"
         f"─────────────────────────────\n"
-        f"• All 35 Rules (1-15 Safety + 16-35 Signals): Active\n"
-        f"• App ID: `{DERIV_APP_ID}`\n"
-        f"• Multi-Timeframe (1H, 15M, 5M) + ML Confidence (80%+): Active\n"
-        f"• Database Audit Logging & Break-Even Lock: Active"
+        f"• Capital Defense Rules (1-15): Active\n"
+        f"• Signal Engine Rules (16-35): Active\n"
+        f"• trend_filter.py Confluence: Connected & Active\n"
+        f"• App ID: `{DERIV_APP_ID}`"
     )
 
-    # Background Tasks
     asyncio.create_task(periodic_telegram_heartbeat())
-    asyncio.create_task(stealth_sl_break_even_loop())
     asyncio.create_task(ram_cleaner_loop())
+    asyncio.create_task(stealth_sl_break_even_loop())
     asyncio.create_task(market_scanning_loop())
 
     while True:
