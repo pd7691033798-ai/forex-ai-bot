@@ -1,3 +1,4 @@
+ 
 import os
 import time
 import json
@@ -12,6 +13,10 @@ import pandas as pd
 import numpy as np
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, List, Tuple
+from trend_filter import TrendFilterEngine
+
+# Trend Engine initialize करें
+trend_engine = TrendFilterEngine(ema_period=200)
 
 # -------------------------------------------------------------
 # 0. RENDER HEALTH CHECK SERVER (Rule 9 & 10 Support)
@@ -438,29 +443,6 @@ async def execute_deriv_trade(symbol: str, contract_type: str, confidence: float
         logging.error(f"Execution Error: {e}")
         send_telegram_message(f"🚨 *Execution Exception:* `{str(e)}`")
 
-async def market_scanning_loop():
-    logging.info("🔎 Rule Set 2 Real-Time Market Scanner Online...")
-    while True:
-        try:
-            # 1H, 15M, 5M Data Generation/Fetching
-            base_price = 1000.0
-            dummy_1h = [base_price + i * 0.5 for i in range(210)]
-            dummy_15m = [base_price + 100 + i * 0.2 for i in range(100)]
-            dummy_5m = [base_price + 105 + (i % 5) * 0.1 for i in range(50)]
-            current_spread = 0.4  # Within limit
-
-            signal, confidence, reason = signal_engine.evaluate_signals(dummy_1h, dummy_15m, dummy_5m, current_spread)
-
-            if signal in ["CALL", "PUT"] and confidence >= 80.0:
-                is_safe, _ = guardian.check_safety_guards()
-                if is_safe and len(guardian.phantom_positions) == 0:
-                    logging.info(f"🎯 Rule Set 2 High-Precision Signal: {signal} ({confidence:.1f}%)")
-                    await execute_deriv_trade("R_100", signal, confidence, 1)
-
-        except Exception as e:
-            logging.error(f"Market Scanner Loop Error: {e}")
-
-        await asyncio.sleep(60)
 
 async def periodic_telegram_heartbeat():
     while True:
@@ -477,6 +459,32 @@ async def periodic_telegram_heartbeat():
                 f"👻 *Active Positions:* {len(guardian.phantom_positions)}\n"
                 f"⏰ *Server Time:* `{datetime.datetime.utcnow().strftime('%H:%M:%S UTC')}`"
             )
+            async def market_scanning_loop():
+    logging.info("🔎 Real-Time Market Scanner using trend_filter.py Engine...")
+    while True:
+        try:
+            # 1H, 15M, 5M कैंडल्स का डेटा
+            dummy_prices = [100.0 + i * 0.1 for i in range(250)]
+
+            # trend_filter.py के EMA 200 फ़ंक्शन को कॉल करें
+            alignment = trend_engine.evaluate_multi_timeframe_alignment(
+                data_1h=dummy_prices,
+                data_15m=dummy_prices,
+                data_5m=dummy_prices
+            )
+
+            if alignment["allowed"]:
+                contract_type = "CALL" if alignment["direction"] == "BUY" else "PUT"
+                is_safe, _ = guardian.check_safety_guards()
+                if is_safe and len(guardian.phantom_positions) == 0:
+                    logging.info(f"🎯 Confluence Passed: {contract_type} | {alignment['reason']}")
+                    await execute_deriv_trade("R_100", contract_type, 85.0, 1)
+
+        except Exception as e:
+            logging.error(f"Market Scanner Loop Error: {e}")
+
+        await asyncio.sleep(60)
+        
             send_telegram_message(status_text)
         except Exception as e:
             logging.error(f"Heartbeat Error: {e}")
