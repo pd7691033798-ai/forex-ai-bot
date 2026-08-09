@@ -459,8 +459,9 @@ async def periodic_telegram_heartbeat():
                 f"👻 *Active Positions:* {len(guardian.phantom_positions)}\n"
                 f"⏰ *Server Time:* `{datetime.datetime.utcnow().strftime('%H:%M:%S UTC')}`"
             )
-            async def market_scanning_loop():
-    logging.info("🔎 Real-Time Market Scanner using trend_filter.py Engine...")
+
+         async def market_scanning_loop():
+    logging.info("🔎 Real-Time Market Scanner using trend_filter.py Engine....")
     while True:
         try:
             # 1H, 15M, 5M कैंडल्स का डेटा
@@ -484,6 +485,7 @@ async def periodic_telegram_heartbeat():
             logging.error(f"Market Scanner Loop Error: {e}")
 
         await asyncio.sleep(60)
+
         
             send_telegram_message(status_text)
         except Exception as e:
