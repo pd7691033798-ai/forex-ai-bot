@@ -1,12 +1,10 @@
-flask
+websockets
+websocket-client
 requests
-yfinance
 pandas
 numpy
 ta
 scikit-learn
 gunicorn
-streamlit
-requests
-pandas
-websocket-client
+Flask
+
