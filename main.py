@@ -441,13 +441,14 @@ async def periodic_telegram_heartbeat():
         await asyncio.sleep(600)
 
 # -------------------------------------------------------------
-# DERIV REAL LIVE CANDLE FETCH ENGINE
+# DERIV REAL LIVE CANDLE FETCH ENGINE (FIXED)
 # -------------------------------------------------------------
 async def fetch_deriv_candles(symbol: str, granularity: int, count: int = 210) -> List[float]:
     """Deriv Live WebSocket से असली कैंडल क्लोज़ प्राइस फैच करने के लिए"""
     ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
     try:
-        async with websockets.connect(ws_url, timeout=10) as ws:
+        # websockets.connect से timeout आर्ग्युमेंट हटा दिया गया है
+        async with websockets.connect(ws_url) as ws:
             req = {
                 "ticks_history": symbol,
                 "adjust_start_time": 1,
@@ -457,7 +458,7 @@ async def fetch_deriv_candles(symbol: str, granularity: int, count: int = 210) -
                 "granularity": granularity  # 300=5m, 900=15m, 3600=1h
             }
             await ws.send(json.dumps(req))
-            res = json.loads(await ws.recv())
+            res = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
             if "candles" in res:
                 return [float(c["close"]) for c in res["candles"]]
             elif "error" in res:
