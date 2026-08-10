@@ -170,6 +170,8 @@ class RuleSet2SignalEngine:
         self.max_spread_multiplier = 2.0  # Rule 28
         self.api_call_count = 0
         self.last_api_reset = time.time()
+        self.last_signal = "NONE"
+        self.last_reason = "Initializing Scanner"
 
     def sanitize_data_and_fill_gaps(self, prices: List[float]) -> List[float]:
         """Rule 31 & 32: Bad Ticks Filter & Data Gap Filler"""
@@ -428,6 +430,7 @@ async def periodic_telegram_heartbeat():
                 f"🎯 *1% Stake:* `${guardian.get_1pct_stake_amount():.2f}`\n"
                 f"🛡️ *Safety Status:* {safety_msg}\n"
                 f"📡 *Latency:* `{guardian.latency_ms:.1f}ms`\n"
+                f"🔎 *Scanner Status:* `{signal_engine.last_signal}` ({signal_engine.last_reason})\n"
                 f"👻 *Active Positions:* {len(guardian.phantom_positions)}\n"
                 f"⏰ *Server Time:* `{datetime.datetime.utcnow().strftime('%H:%M:%S UTC')}`"
             )
@@ -437,28 +440,65 @@ async def periodic_telegram_heartbeat():
 
         await asyncio.sleep(600)
 
+# -------------------------------------------------------------
+# DERIV REAL LIVE CANDLE FETCH ENGINE
+# -------------------------------------------------------------
+async def fetch_deriv_candles(symbol: str, granularity: int, count: int = 210) -> List[float]:
+    """Deriv Live WebSocket से असली कैंडल क्लोज़ प्राइस फैच करने के लिए"""
+    ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
+    try:
+        async with websockets.connect(ws_url, timeout=10) as ws:
+            req = {
+                "ticks_history": symbol,
+                "adjust_start_time": 1,
+                "count": count,
+                "end": "latest",
+                "style": "candles",
+                "granularity": granularity  # 300=5m, 900=15m, 3600=1h
+            }
+            await ws.send(json.dumps(req))
+            res = json.loads(await ws.recv())
+            if "candles" in res:
+                return [float(c["close"]) for c in res["candles"]]
+            elif "error" in res:
+                logging.error(f"Deriv API Error ({granularity}s): {res['error']['message']}")
+    except Exception as e:
+        logging.error(f"Deriv Live Data Fetch Error ({granularity}s): {e}")
+    return []
+
+# -------------------------------------------------------------
+# REAL-TIME MARKET SCANNING LOOP (LIVE DATA)
+# -------------------------------------------------------------
 async def market_scanning_loop():
     logging.info("🔎 Rule Set 2 Signal Engine & trend_filter.py Real-Time Scanner Online...")
+    symbol = "R_100"  # Volatility 100 Index
+    
     while True:
         try:
-            base_price = 1000.0
-            dummy_1h = [base_price + i * 0.5 for i in range(210)]
-            dummy_15m = [base_price + 100 + i * 0.2 for i in range(100)]
-            dummy_5m = [base_price + 105 + (i % 5) * 0.1 for i in range(50)]
+            # 🟢 असली Live Deriv Candle Data
+            p1h = await fetch_deriv_candles(symbol, granularity=3600, count=210)   # 1H
+            p15m = await fetch_deriv_candles(symbol, granularity=900, count=100)   # 15M
+            p5m = await fetch_deriv_candles(symbol, granularity=300, count=50)     # 5M
             current_spread = 0.4
 
-            signal, confidence, reason = signal_engine.evaluate_signals(dummy_1h, dummy_15m, dummy_5m, current_spread)
+            if p1h and p15m and p5m:
+                signal, confidence, reason = signal_engine.evaluate_signals(p1h, p15m, p5m, current_spread)
+                signal_engine.last_signal = signal
+                signal_engine.last_reason = reason
 
-            if signal in ["CALL", "PUT"] and confidence >= 80.0:
-                is_safe, _ = guardian.check_safety_guards()
-                if is_safe and len(guardian.phantom_positions) == 0:
-                    logging.info(f"🎯 High-Precision Confluence Passed: {signal} ({confidence:.1f}%) | {reason}")
-                    await execute_deriv_trade("R_100", signal, confidence, 1)
+                if signal in ["CALL", "PUT"] and confidence >= 80.0:
+                    is_safe, _ = guardian.check_safety_guards()
+                    if is_safe and len(guardian.phantom_positions) == 0:
+                        logging.info(f"🎯 High-Precision Confluence Passed: {signal} ({confidence:.1f}%) | {reason}")
+                        await execute_deriv_trade(symbol, signal, confidence, 1)
+            else:
+                signal_engine.last_signal = "NONE"
+                signal_engine.last_reason = "⚠️ Fetching Live Market Data..."
 
         except Exception as e:
             logging.error(f"Market Scanner Loop Error: {e}")
 
-        await asyncio.sleep(60)
+        await asyncio.sleep(15)  # Real-time scan every 15 seconds
 
 async def main():
     logging.info("🚀 Starting Complete Integrated Master Engine (Rule Set 1 + Rule Set 2 + trend_filter.py)...")
@@ -470,6 +510,7 @@ async def main():
         f"• Capital Defense Rules (1-15): Active\n"
         f"• Signal Engine Rules (16-35): Active\n"
         f"• trend_filter.py Confluence: Connected & Active\n"
+        f"• Deriv Live Feed: Connected (R_100)\n"
         f"• App ID: `{DERIV_APP_ID}`"
     )
 
