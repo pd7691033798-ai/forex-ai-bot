@@ -26,19 +26,25 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6449682719")
 DERIV_APP_ID = os.getenv("DERIV_APP_ID", "68423")  
 DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "pat_89e4df8ec1147df432ee86dae0e74b9f05c90819de66c69471c7882c082dca35")
 
-# Multiple Assets to scan like Real Trading
 SYMBOLS_TO_SCAN = ["R_10", "R_25", "R_50", "R_75", "R_100"]
 
-# -------------------------------------------------------------
-# RULE SET 1: CAPITAL GUARDIAN ENGINE
-# -------------------------------------------------------------
+def send_telegram_message(msg):
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
+            timeout=5
+        )
+    except Exception as e:
+        logging.error(f"Telegram Error: {e}")
+
 class RuleSet1CapitalGuardian:
     def __init__(self, initial_balance: float = 10000.0):
         self.initial_balance = initial_balance
         self.current_balance = initial_balance
         self.equity = initial_balance
         self.daily_start_balance = initial_balance
-        self.risk_per_trade_pct = 1.0  # 1% Strict Risk
+        self.risk_per_trade_pct = 1.0 
         self.max_daily_loss_pct = 3.0
         self.active_positions_count = 0
 
@@ -60,9 +66,6 @@ class RuleSet1CapitalGuardian:
 
 guardian = RuleSet1CapitalGuardian()
 
-# -------------------------------------------------------------
-# RULE SET 2: SIGNAL ENGINE
-# -------------------------------------------------------------
 class RuleSet2SignalEngine:
     def calculate_rsi(self, prices: List[float], period: int = 14) -> float:
         if len(prices) < period + 1: return 50.0
@@ -81,11 +84,9 @@ class RuleSet2SignalEngine:
         return float(macd.iloc[-1]), float(signal.iloc[-1])
 
     def evaluate_signals(self, prices_1h: List[float], prices_15m: List[float], prices_5m: List[float], current_spread: float) -> Tuple[str, float, str]:
-        # Phase 3 Rules
         sm_passed, sm_reason, _ = smart_engine.evaluate_smart_money_rules(prices_1h, prices_15m, current_spread)
         if not sm_passed: return "NONE", 0.0, f"⚠️ Rule Set 3 Blocked: {sm_reason}"
 
-        # Multi-Timeframe Alignment
         alignment = trend_engine.evaluate_multi_timeframe_alignment(prices_1h, prices_15m, prices_5m)
         if not alignment["allowed"]:
             return "NONE", 0.0, f"⚠️ Trend Filter: {alignment['reason']}"
@@ -113,9 +114,6 @@ class RuleSet2SignalEngine:
 
 signal_engine = RuleSet2SignalEngine()
 
-# -------------------------------------------------------------
-# WEBSOCKET FETCHING & EXECUTION
-# -------------------------------------------------------------
 async def fetch_all_timeframe_candles(symbol: str) -> Tuple[List[float], List[float], List[float]]:
     ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
     try:
@@ -126,7 +124,15 @@ async def fetch_all_timeframe_candles(symbol: str) -> Tuple[List[float], List[fl
             res_15m = json.loads(await ws.recv())
             await ws.send(json.dumps({"ticks_history": symbol, "adjust_start_time": 1, "count": 50, "end": "latest", "style": "candles", "granularity": 300}))
             res_5m = json.loads(await ws.recv())
-            return [float(c["close"]) for c in res_1h.get("candles", [])], [float(c["close"]) for c in res_15m.get("candles", [])], [float(c["close"]) for c in res_5m.get("candles", [])]
+            
+            c_1h = [float(c["close"]) for c in res_1h.get("candles", [])]
+            c_15m = [float(c["close"]) for c in res_15m.get("candles", [])]
+            c_5m = [float(c["close"]) for c in res_5m.get("candles", [])]
+
+            if len(c_1h) < 20 or len(c_15m) < 20 or len(c_5m) < 20:
+                return [], [], []
+
+            return c_1h, c_15m, c_5m
     except Exception as e:
         return [], [], []
 
@@ -135,43 +141,72 @@ async def release_position_lock_after_delay(delay_seconds: int = 300):
     guardian.active_positions_count = max(0, guardian.active_positions_count - 1)
     logging.info("🔓 Trade Duration Finished: Position Lock Released")
 
-async def execute_deriv_trade(symbol: str, contract_type: str, stake_amount: float):
+async def execute_deriv_trade(symbol: str, contract_type: str, stake_amount: float) -> bool:
     is_safe, reason = guardian.check_safety_guards()
     if not is_safe:
-        return
+        logging.warning(f"🚫 Trade Blocked by Guardian: {reason}")
+        return False
 
     ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
     try:
         async with websockets.connect(ws_url) as ws:
+            # 1. Authorize Token
             await ws.send(json.dumps({"authorize": DERIV_API_TOKEN}))
             auth_res = json.loads(await ws.recv())
-            if "error" in auth_res: return
+            if "error" in auth_res:
+                err_msg = auth_res["error"]["message"]
+                logging.error(f"❌ Deriv Auth Error: {err_msg}")
+                send_telegram_message(f"❌ Deriv Auth Failed: {err_msg}\nCheck API Token on Deriv!")
+                return False
+            
             guardian.update_balance(float(auth_res["authorize"]["balance"]))
 
-            proposal_req = {"proposal": 1, "amount": stake_amount, "basis": "stake", "contract_type": "CALL" if contract_type == "CALL" else "PUT", "currency": "USD", "duration": 5, "duration_unit": "m", "symbol": symbol}
+            # 2. Contract Proposal Request
+            proposal_req = {
+                "proposal": 1,
+                "amount": stake_amount,
+                "basis": "stake",
+                "contract_type": "CALL" if contract_type == "CALL" else "PUT",
+                "currency": "USD",
+                "duration": 5,
+                "duration_unit": "m",
+                "symbol": symbol
+            }
             await ws.send(json.dumps(proposal_req))
             prop_res = json.loads(await ws.recv())
-            if "error" in prop_res: return
+            if "error" in prop_res:
+                err_msg = prop_res["error"]["message"]
+                logging.error(f"❌ Proposal Error: {err_msg}")
+                send_telegram_message(f"❌ Deriv Proposal Rejected: {err_msg}")
+                return False
             
+            # 3. Buy Contract Request
             buy_req = {"buy": prop_res["proposal"]["id"], "price": prop_res["proposal"]["ask_price"]}
             await ws.send(json.dumps(buy_req))
             buy_res = json.loads(await ws.recv())
-            if "error" not in buy_res:
+            
+            if "error" in buy_res:
+                err_msg = buy_res["error"]["message"]
+                logging.error(f"❌ Buy Execution Error: {err_msg}")
+                send_telegram_message(f"❌ Trade Buy Failed: {err_msg}")
+                return False
+            else:
                 guardian.active_positions_count += 1
-                asyncio.create_task(release_position_lock_after_delay(300))  # 5 min lock release timer
+                asyncio.create_task(release_position_lock_after_delay(300))
+                logging.info(f"✅ Trade Successfully Placed on Deriv: {symbol} {contract_type}")
                 send_telegram_message(
-                    f"🎉 *REAL-CONDITIONS DEMO TRADE EXECUTED!*\n"
-                    f"• Asset: `{symbol}`\n"
-                    f"• Type: `{contract_type}`\n"
-                    f"• Stake: `${stake_amount}`\n"
-                    f"• Duration: `5 Minutes`"
+                    f"🎉 REAL-CONDITIONS DEMO TRADE EXECUTED!\n"
+                    f"• Asset: {symbol}\n"
+                    f"• Type: {contract_type}\n"
+                    f"• Stake: ${stake_amount}\n"
+                    f"• Duration: 5 Minutes"
                 )
+                return True
     except Exception as e:
-        logging.error(f"Trade Exception: {e}")
+        logging.error(f"Trade Execution Exception: {e}")
+        send_telegram_message(f"⚠️ Execution Exception: {str(e)}")
+        return False
 
-# -------------------------------------------------------------
-# MAIN MULTI-ASSET SCANNER LOOP
-# -------------------------------------------------------------
 async def market_scanning_loop():
     logging.info("🔎 Real-Condition Multi-Asset Scanner Active...")
     while True:
@@ -184,27 +219,23 @@ async def market_scanning_loop():
                 signal, confidence, reason = signal_engine.evaluate_signals(real_1h, real_15m, real_5m, 0.4)
 
                 if signal in ["CALL", "PUT"] and confidence >= 65.0:
-                    logging.info(f"🎯 Valid Trade on {symbol}: {signal} ({confidence:.1f}%)")
+                    logging.info(f"🎯 Valid Trade Signal on {symbol}: {signal} ({confidence:.1f}%)")
                     stake = guardian.get_1pct_stake_amount()
-                    await execute_deriv_trade(symbol, signal, stake_amount=stake)
+                    executed = await execute_deriv_trade(symbol, signal, stake_amount=stake)
+                    if executed:
+                        logging.info("⏸️ Trade Placed! Pausing scanner for 300 seconds...")
+                        await asyncio.sleep(300)  # 5 मिनट तक स्कैनिंग रोकें ताकि पिछला ट्रेड पूरा हो
 
             except Exception as e:
                 logging.error(f"Scanner Loop Error on {symbol}: {e}")
             
-            await asyncio.sleep(5) # Delay to prevent rate limits
+            await asyncio.sleep(5)
 
         await asyncio.sleep(30)
 
-# -------------------------------------------------------------
-# STARTUP
-# -------------------------------------------------------------
-def send_telegram_message(msg):
-    try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
-    except: pass
-
 async def main():
     threading.Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.getenv("PORT", 10000))), HealthCheckHandler).serve_forever(), daemon=True).start()
-    send_telegram_message("🚀 *Multi-Asset Real Condition Training Engine Started!* Scanning 5 Volatility Indices...")
+    send_telegram_message("🚀 Multi-Asset Real Condition Training Engine Started! Scanning 5 Volatility Indices...")
     asyncio.create_task(market_scanning_loop())
     while True: await asyncio.sleep(1)
 
@@ -214,4 +245,3 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     asyncio.run(main())
-                
