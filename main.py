@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8767606359:AAH7dZn_9dsT1HwmOkbvKAB2bgB2aEvOz0c")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6449682719")
 DERIV_APP_ID = os.getenv("DERIV_APP_ID", "68423")  
-DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "pat_f12eed52d441c6b672f38851c47dc43fd7eb64a1656374707af8048115d70beb")
+DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "pat_e428c41edaab749c3336dee5007adde64d6b6ff5a2f1a42e04736de740c77621")
 
 SYMBOLS_TO_SCAN = ["R_10", "R_25", "R_50", "R_75", "R_100"]
 
