@@ -34,9 +34,7 @@ DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "pat_007694a0cbf4459dbe3d9d3dce0b
 SYMBOLS_TO_SCAN = [
     "R_10", "R_25", "R_50", "R_75", "R_100",  # Deriv Synthetic Volatility (100% Working)
     "frxEURUSD", "frxGBPUSD"                   # Major Forex Pairs
-]
 
-]
 
 # Health Check Server Handler for Render
 class HealthCheckHandler(BaseHTTPRequestHandler):
