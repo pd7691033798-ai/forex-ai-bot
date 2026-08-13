@@ -24,8 +24,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8767606359:AAH7dZn_9dsT1HwmOkbvKAB2bgB2aEvOz0c")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6449682719")
 DERIV_APP_ID = os.getenv("DERIV_APP_ID", "68423")  
-DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "pat_5c81fda0a57ef6c95833fc2a51428dd0cd828a2ca5dfaa84f259086d55d0282b")
-
+DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN","pat_007694a0cbf4459dbe3d9d3dce0bcc61436142c409443bc11f3e5775ebedab08")
 SYMBOLS_TO_SCAN = ["R_10", "R_25", "R_50", "R_75", "R_100"]
 
 def send_telegram_message(msg):
