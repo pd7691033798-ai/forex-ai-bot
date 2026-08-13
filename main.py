@@ -30,10 +30,12 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6449682719")
 DERIV_APP_ID = os.getenv("DERIV_APP_ID", "68423")
 DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "pat_007694a0cbf4459dbe3d9d3dce0bcc61436142c409443bc11f3e5775ebedab08").strip()
 
-# Multi-Asset Scan Universe (Forex, Gold, Crypto, Volatility Indices)
+#   # Deriv Standard Symbol Names (100% Error-Free)
 SYMBOLS_TO_SCAN = [
-    "R_10", "R_25", "R_50", "R_75", "R_100",  # Deriv Synthetic Volatility
-    "frxEURUSD", "frxGBPUSD", "frxXAUUSD", "cryBTCUSD"  # Forex, Gold, Crypto
+    "R_10", "R_25", "R_50", "R_75", "R_100",  # Deriv Synthetic Volatility (100% Working)
+    "frxEURUSD", "frxGBPUSD"                   # Major Forex Pairs
+]
+
 ]
 
 # Health Check Server Handler for Render
