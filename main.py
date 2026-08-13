@@ -15,25 +15,47 @@ from typing import Dict, Any, List, Tuple
 from trend_filter import TrendFilterEngine
 from smart_money import SmartMoneyEngine
 
+# Logging Setup
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
+
+# Global Engines
 trend_engine = TrendFilterEngine(ema_period=200)
 smart_engine = SmartMoneyEngine()
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
-
-# Environment Variables
+# Configuration & Credentials
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8767606359:AAH7dZn_9dsT1HwmOkbvKAB2bgB2aEvOz0c")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6449682719")
 DERIV_APP_ID = os.getenv("DERIV_APP_ID", "68423")  
-DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN","pat_007694a0cbf4459dbe3d9d3dce0bcc61436142c409443bc11f3e5775ebedab08")
+DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "pat_007694a0cbf4459dbe3d9d3dce0bcc61436142c409443bc11f3e5775ebedab08")
+
 SYMBOLS_TO_SCAN = ["R_10", "R_25", "R_50", "R_75", "R_100"]
 
-def send_telegram_message(msg):
+# Health Check Server Handler for Render (Port 10000)
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        return  # Silence server log noise
+
+def run_health_server():
+    port = int(os.getenv("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    logging.info(f"🌐 Health Check Server running on port {port}")
+    server.serve_forever()
+
+def send_telegram_message(msg: str):
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
-            timeout=5
-        )
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
     except Exception as e:
         logging.error(f"Telegram Error: {e}")
 
@@ -107,140 +129,132 @@ class RuleSet2SignalEngine:
         elif votes_put >= 1 and trend_direction == "BEARISH": signal_type = "PUT"
 
         if signal_type == "NONE": return "NONE", 0.0, "⚠️ Indicator Confluence Pending"
-
-        confidence_score = 65.0 + (votes_call if signal_type == "CALL" else votes_put) * 5.0
-        return signal_type, confidence_score, f"🟢 Practical Trend Alignment Passed"
+        return signal_type, 70.0, "🟢 Signal Validated"
 
 signal_engine = RuleSet2SignalEngine()
 
-async def fetch_all_timeframe_candles(symbol: str) -> Tuple[List[float], List[float], List[float]]:
-    ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
+# Deriv API Websocket Operations
+ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
+
+async def fetch_deriv_candles(symbol: str, granularity: int, count: int = 100) -> List[float]:
     try:
+        # Fixed websockets.connect without unsupported timeout argument
         async with websockets.connect(ws_url) as ws:
-            await ws.send(json.dumps({"ticks_history": symbol, "adjust_start_time": 1, "count": 210, "end": "latest", "style": "candles", "granularity": 3600}))
-            res_1h = json.loads(await ws.recv())
-            await ws.send(json.dumps({"ticks_history": symbol, "adjust_start_time": 1, "count": 100, "end": "latest", "style": "candles", "granularity": 900}))
-            res_15m = json.loads(await ws.recv())
-            await ws.send(json.dumps({"ticks_history": symbol, "adjust_start_time": 1, "count": 50, "end": "latest", "style": "candles", "granularity": 300}))
-            res_5m = json.loads(await ws.recv())
-            
-            c_1h = [float(c["close"]) for c in res_1h.get("candles", [])]
-            c_15m = [float(c["close"]) for c in res_15m.get("candles", [])]
-            c_5m = [float(c["close"]) for c in res_5m.get("candles", [])]
-
-            if len(c_1h) < 20 or len(c_15m) < 20 or len(c_5m) < 20:
-                return [], [], []
-
-            return c_1h, c_15m, c_5m
-    except Exception as e:
-        return [], [], []
-
-async def release_position_lock_after_delay(delay_seconds: int = 300):
-    await asyncio.sleep(delay_seconds)
-    guardian.active_positions_count = max(0, guardian.active_positions_count - 1)
-    logging.info("🔓 Trade Duration Finished: Position Lock Released")
-
-async def execute_deriv_trade(symbol: str, contract_type: str, stake_amount: float) -> bool:
-    is_safe, reason = guardian.check_safety_guards()
-    if not is_safe:
-        logging.warning(f"🚫 Trade Blocked by Guardian: {reason}")
-        return False
-
-    ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
-    try:
-        async with websockets.connect(ws_url) as ws:
-            # 1. Authorize Token
-            await ws.send(json.dumps({"authorize": DERIV_API_TOKEN}))
-            auth_res = json.loads(await ws.recv())
-            if "error" in auth_res:
-                err_msg = auth_res["error"]["message"]
-                logging.error(f"❌ Deriv Auth Error: {err_msg}")
-                send_telegram_message(f"❌ Deriv Auth Failed: {err_msg}\nCheck API Token on Deriv!")
-                return False
-            
-            guardian.update_balance(float(auth_res["authorize"]["balance"]))
-
-            # 2. Contract Proposal Request
-            proposal_req = {
-                "proposal": 1,
-                "amount": stake_amount,
-                "basis": "stake",
-                "contract_type": "CALL" if contract_type == "CALL" else "PUT",
-                "currency": "USD",
-                "duration": 5,
-                "duration_unit": "m",
-                "symbol": symbol
+            req = {
+                "ticks_history": symbol,
+                "adjust_start_time": 1,
+                "count": count,
+                "end": "latest",
+                "start": 1,
+                "style": "candles",
+                "granularity": granularity
             }
-            await ws.send(json.dumps(proposal_req))
-            prop_res = json.loads(await ws.recv())
-            if "error" in prop_res:
-                err_msg = prop_res["error"]["message"]
-                logging.error(f"❌ Proposal Error: {err_msg}")
-                send_telegram_message(f"❌ Deriv Proposal Rejected: {err_msg}")
+            await ws.send(json.dumps(req))
+            resp = await asyncio.wait_for(ws.recv(), timeout=10)
+            data = json.loads(resp)
+            if "candles" in data:
+                return [float(c["close"]) for c in data["candles"]]
+    except Exception as e:
+        logging.error(f"Deriv Live Data Fetch Error ({granularity}s): {e}")
+    return []
+
+async def execute_deriv_trade(symbol: str, contract_type: str, stake: float) -> bool:
+    try:
+        async with websockets.connect(ws_url) as ws:
+            # 1. Authorize API Token
+            auth_req = {"authorize": DERIV_API_TOKEN}
+            await ws.send(json.dumps(auth_req))
+            auth_resp = await asyncio.wait_for(ws.recv(), timeout=10)
+            auth_data = json.loads(auth_resp)
+
+            if "error" in auth_data:
+                err_msg = auth_data["error"]["message"]
+                logging.error(f"❌ Deriv Auth Error: {err_msg}")
+                send_telegram_message(f"❌ *Deriv Auth Error*: {err_msg}\nPlease verify API Token permissions.")
                 return False
-            
-            # 3. Buy Contract Request
-            buy_req = {"buy": prop_res["proposal"]["id"], "price": prop_res["proposal"]["ask_price"]}
+
+            if "authorize" in auth_data:
+                bal = float(auth_data["authorize"].get("balance", guardian.current_balance))
+                guardian.update_balance(bal)
+
+            # 2. Execute Trade Buy Contract
+            buy_req = {
+                "buy": 1,
+                "price": stake,
+                "parameters": {
+                    "amount": stake,
+                    "basis": "stake",
+                    "contract_type": contract_type,
+                    "currency": "USD",
+                    "duration": 5,
+                    "duration_unit": "m",
+                    "symbol": symbol
+                }
+            }
             await ws.send(json.dumps(buy_req))
-            buy_res = json.loads(await ws.recv())
-            
-            if "error" in buy_res:
-                err_msg = buy_res["error"]["message"]
-                logging.error(f"❌ Buy Execution Error: {err_msg}")
-                send_telegram_message(f"❌ Trade Buy Failed: {err_msg}")
+            buy_resp = await asyncio.wait_for(ws.recv(), timeout=10)
+            buy_data = json.loads(buy_resp)
+
+            if "error" in buy_data:
+                logging.error(f"❌ Trade Execution Error: {buy_data['error']}")
+                send_telegram_message(f"⚠️ *Trade Failed* on {symbol}: {buy_data['error']['message']}")
                 return False
-            else:
-                guardian.active_positions_count += 1
-                asyncio.create_task(release_position_lock_after_delay(300))
-                logging.info(f"✅ Trade Successfully Placed on Deriv: {symbol} {contract_type}")
-                send_telegram_message(
-                    f"🎉 REAL-CONDITIONS DEMO TRADE EXECUTED!\n"
-                    f"• Asset: {symbol}\n"
-                    f"• Type: {contract_type}\n"
-                    f"• Stake: ${stake_amount}\n"
-                    f"• Duration: 5 Minutes"
-                )
-                return True
+
+            contract_id = buy_data["buy"]["contract_id"]
+            logging.info(f"✅ Trade Placed Successfully! Contract ID: {contract_id}")
+            send_telegram_message(f"🚀 *TRADE EXECUTED*\n\n*Symbol:* {symbol}\n*Type:* {contract_type}\n*Stake:* ${stake}\n*Contract ID:* {contract_id}\n*Duration:* 5 Min")
+            return True
     except Exception as e:
         logging.error(f"Trade Execution Exception: {e}")
-        send_telegram_message(f"⚠️ Execution Exception: {str(e)}")
         return False
 
 async def market_scanning_loop():
-    logging.info("🔎 Real-Condition Multi-Asset Scanner Active...")
+    logging.info("🔎 Rule Set 2 Signal Engine & trend_filter.py Real-Time Scanner Online...")
+    send_telegram_message("🚀 *Integrated Master Engine Online*\nScanner Active across Volatility Indices!")
+
     while True:
-        for symbol in SYMBOLS_TO_SCAN:
-            try:
-                real_1h, real_15m, real_5m = await fetch_all_timeframe_candles(symbol)
-                if not real_1h or not real_15m or not real_5m:
+        try:
+            is_safe, safety_reason = guardian.check_safety_guards()
+            if not is_safe:
+                logging.warning(f"Safety Guard Active: {safety_reason}")
+                await asyncio.sleep(15)
+                continue
+
+            for symbol in SYMBOLS_TO_SCAN:
+                prices_1h = await fetch_deriv_candles(symbol, 3600, 100)
+                prices_15m = await fetch_deriv_candles(symbol, 900, 100)
+                prices_5m = await fetch_deriv_candles(symbol, 300, 100)
+
+                if len(prices_1h) < 30 or len(prices_15m) < 30 or len(prices_5m) < 30:
                     continue
 
-                signal, confidence, reason = signal_engine.evaluate_signals(real_1h, real_15m, real_5m, 0.4)
+                current_spread = 0.0001
+                signal, confidence, reason = signal_engine.evaluate_signals(prices_1h, prices_15m, prices_5m, current_spread)
 
-                if signal in ["CALL", "PUT"] and confidence >= 65.0:
-                    logging.info(f"🎯 Valid Trade Signal on {symbol}: {signal} ({confidence:.1f}%)")
+                if signal in ["CALL", "PUT"] and confidence >= 70.0:
+                    logging.info(f"🎯 Valid Trade Signal on {symbol}: {signal} ({confidence}%)")
                     stake = guardian.get_1pct_stake_amount()
-                    executed = await execute_deriv_trade(symbol, signal, stake_amount=stake)
-                    if executed:
-                        logging.info("⏸️ Trade Placed! Pausing scanner for 300 seconds...")
-                        await asyncio.sleep(300)  # 5 मिनट तक स्कैनिंग रोकें ताकि पिछला ट्रेड पूरा हो
+                    
+                    guardian.active_positions_count += 1
+                    success = await execute_deriv_trade(symbol, signal, stake)
+                    
+                    if success:
+                        await asyncio.sleep(300)  # Wait for 5-minute trade duration to expire
+                    
+                    guardian.active_positions_count = max(0, guardian.active_positions_count - 1)
 
-            except Exception as e:
-                logging.error(f"Scanner Loop Error on {symbol}: {e}")
-            
-            await asyncio.sleep(5)
+        except Exception as e:
+            logging.error(f"Market Scanning Loop Error: {e}")
+        
+        await asyncio.sleep(5)
 
-        await asyncio.sleep(30)
+def main():
+    # Start Health Check Server on Port 10000 in background
+    t = threading.Thread(target=run_health_server, daemon=True)
+    t.start()
 
-async def main():
-    threading.Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.getenv("PORT", 10000))), HealthCheckHandler).serve_forever(), daemon=True).start()
-    send_telegram_message("🚀 Multi-Asset Real Condition Training Engine Started! Scanning 5 Volatility Indices...")
-    asyncio.create_task(market_scanning_loop())
-    while True: await asyncio.sleep(1)
-
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200); self.end_headers(); self.wfile.write(b"Training Engine Online")
+    logging.info("🚀 Starting Complete Integrated Master Engine (Rule Set 1 + Rule Set 2 + trend_filter.py)...")
+    asyncio.run(market_scanning_loop())
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
