@@ -14,6 +14,7 @@ from typing import Dict, Any, List, Tuple
 
 from trend_filter import TrendFilterEngine
 from smart_money import SmartMoneyEngine
+from news_guard import EconomicNewsGuard
 
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
@@ -21,22 +22,27 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - 
 # Global Engines
 trend_engine = TrendFilterEngine(ema_period=200)
 smart_engine = SmartMoneyEngine()
+news_guard = EconomicNewsGuard()
 
 # Configuration & Credentials
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8767606359:AAH7dZn_9dsT1HwmOkbvKAB2bgB2aEvOz0c")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6449682719")
-DERIV_APP_ID = os.getenv("DERIV_APP_ID", "68423")  
-DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "pat_007694a0cbf4459dbe3d9d3dce0bcc61436142c409443bc11f3e5775ebedab08")
+DERIV_APP_ID = os.getenv("DERIV_APP_ID", "68423")
+DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "pat_007694a0cbf4459dbe3d9d3dce0bcc61436142c409443bc11f3e5775ebedab08").strip()
 
-SYMBOLS_TO_SCAN = ["R_10", "R_25", "R_50", "R_75", "R_100"]
+# Multi-Asset Scan Universe (Forex, Gold, Crypto, Volatility Indices)
+SYMBOLS_TO_SCAN = [
+    "R_10", "R_25", "R_50", "R_75", "R_100",  # Deriv Synthetic Volatility
+    "frxEURUSD", "frxGBPUSD", "frxXAUUSD", "cryBTCUSD"  # Forex, Gold, Crypto
+]
 
-# Health Check Server Handler for Render (Port 10000)
+# Health Check Server Handler for Render
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"OK")
+        self.wfile.write(b"OK - Smart Balance Master Engine Active")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -44,7 +50,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def log_message(self, format, *args):
-        return  # Silence server log noise
+        return
 
 def run_health_server():
     port = int(os.getenv("PORT", 10000))
@@ -87,7 +93,7 @@ class RuleSet1CapitalGuardian:
 
 guardian = RuleSet1CapitalGuardian()
 
-class RuleSet2SignalEngine:
+class FlexibleSignalEngine:
     def calculate_rsi(self, prices: List[float], period: int = 14) -> float:
         if len(prices) < period + 1: return 50.0
         delta = pd.Series(prices).diff()
@@ -105,9 +111,20 @@ class RuleSet2SignalEngine:
         return float(macd.iloc[-1]), float(signal.iloc[-1])
 
     def evaluate_signals(self, prices_1h: List[float], prices_15m: List[float], prices_5m: List[float], current_spread: float) -> Tuple[str, float, str]:
-        sm_passed, sm_reason, _ = smart_engine.evaluate_smart_money_rules(prices_1h, prices_15m, current_spread)
-        if not sm_passed: return "NONE", 0.0, f"⚠️ Rule Set 3 Blocked: {sm_reason}"
+        # 1. Economic News Guard Check
+        is_news, news_reason = news_guard.is_high_impact_news_near()
+        if is_news:
+            return "NONE", 0.0, news_reason
 
+        # 2. Smart Money Concepts (SMC) Rule Set 3 Check (Handled safely for tuple format)
+        smc_res = smart_engine.evaluate_smart_money_rules(prices_1h, prices_15m, current_spread)
+        sm_passed, sm_reason = smc_res[0], smc_res[1]
+        sm_boost = smc_res[2] if len(smc_res) > 2 and isinstance(smc_res[2], (int, float)) else 0.0
+
+        if not sm_passed:
+            return "NONE", 0.0, f"⚠️ Rule Set 3 Blocked: {sm_reason}"
+
+        # 3. Multi-Timeframe Trend Alignment Check
         alignment = trend_engine.evaluate_multi_timeframe_alignment(prices_1h, prices_15m, prices_5m)
         if not alignment["allowed"]:
             return "NONE", 0.0, f"⚠️ Trend Filter: {alignment['reason']}"
@@ -117,9 +134,11 @@ class RuleSet2SignalEngine:
         rsi = self.calculate_rsi(prices_5m)
         macd, signal = self.calculate_macd(prices_5m)
 
+        base_confidence = 60.0
         votes_call, votes_put = 0, 0
-        if 35 < rsi < 55 and trend_direction == "BULLISH": votes_call += 1
-        elif 45 < rsi < 65 and trend_direction == "BEARISH": votes_put += 1
+
+        if 35 < rsi < 60 and trend_direction == "BULLISH": votes_call += 1
+        elif 40 < rsi < 65 and trend_direction == "BEARISH": votes_put += 1
         
         if macd > signal: votes_call += 1
         elif macd < signal: votes_put += 1
@@ -128,17 +147,22 @@ class RuleSet2SignalEngine:
         if votes_call >= 1 and trend_direction == "BULLISH": signal_type = "CALL"
         elif votes_put >= 1 and trend_direction == "BEARISH": signal_type = "PUT"
 
-        if signal_type == "NONE": return "NONE", 0.0, "⚠️ Indicator Confluence Pending"
-        return signal_type, 70.0, "🟢 Signal Validated"
+        # Calculate Final Flexible Confidence Score (Base + Votes + SMC Boost)
+        confidence_score = base_confidence + (votes_call * 10 if signal_type == "CALL" else votes_put * 10) + sm_boost
 
-signal_engine = RuleSet2SignalEngine()
+        # Flexible Threshold set to 80% Confidence for High-Quality Weekly Trades
+        if confidence_score < 80.0 or signal_type == "NONE":
+            return "NONE", confidence_score, "⚠️ Confluence Score below 80% Threshold"
 
-# Deriv API Websocket Operations
+        return signal_type, confidence_score, "🟢 Signal Validated (SMC + Multi-Asset)"
+
+signal_engine = FlexibleSignalEngine()
+
+# Deriv API WebSocket Connection
 ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
 
 async def fetch_deriv_candles(symbol: str, granularity: int, count: int = 100) -> List[float]:
     try:
-        # Fixed websockets.connect without unsupported timeout argument
         async with websockets.connect(ws_url) as ws:
             req = {
                 "ticks_history": symbol,
@@ -155,13 +179,13 @@ async def fetch_deriv_candles(symbol: str, granularity: int, count: int = 100) -
             if "candles" in data:
                 return [float(c["close"]) for c in data["candles"]]
     except Exception as e:
-        logging.error(f"Deriv Live Data Fetch Error ({granularity}s): {e}")
+        logging.error(f"Live Data Fetch Error on {symbol} ({granularity}s): {e}")
     return []
 
 async def execute_deriv_trade(symbol: str, contract_type: str, stake: float) -> bool:
     try:
         async with websockets.connect(ws_url) as ws:
-            # 1. Authorize API Token
+            # 1. Authorize Token
             auth_req = {"authorize": DERIV_API_TOKEN}
             await ws.send(json.dumps(auth_req))
             auth_resp = await asyncio.wait_for(ws.recv(), timeout=10)
@@ -177,7 +201,7 @@ async def execute_deriv_trade(symbol: str, contract_type: str, stake: float) -> 
                 bal = float(auth_data["authorize"].get("balance", guardian.current_balance))
                 guardian.update_balance(bal)
 
-            # 2. Execute Trade Buy Contract
+            # 2. Execute Trade Order
             buy_req = {
                 "buy": 1,
                 "price": stake,
@@ -201,16 +225,16 @@ async def execute_deriv_trade(symbol: str, contract_type: str, stake: float) -> 
                 return False
 
             contract_id = buy_data["buy"]["contract_id"]
-            logging.info(f"✅ Trade Placed Successfully! Contract ID: {contract_id}")
-            send_telegram_message(f"🚀 *TRADE EXECUTED*\n\n*Symbol:* {symbol}\n*Type:* {contract_type}\n*Stake:* ${stake}\n*Contract ID:* {contract_id}\n*Duration:* 5 Min")
+            logging.info(f"✅ Trade Placed Successfully on {symbol}! Contract ID: {contract_id}")
+            send_telegram_message(f"🚀 *HIGH CONFIDENCE TRADE EXECUTED*\n\n*Asset:* {symbol}\n*Type:* {contract_type}\n*Stake:* ${stake}\n*Contract ID:* {contract_id}\n*Duration:* 5 Min")
             return True
     except Exception as e:
         logging.error(f"Trade Execution Exception: {e}")
         return False
 
 async def market_scanning_loop():
-    logging.info("🔎 Rule Set 2 Signal Engine & trend_filter.py Real-Time Scanner Online...")
-    send_telegram_message("🚀 *Integrated Master Engine Online*\nScanner Active across Volatility Indices!")
+    logging.info("🔎 Multi-Asset Smart-Balance Scanner Active...")
+    send_telegram_message("🚀 *Multi-Asset Smart-Balance Engine Online*\nScanning Synthetic Volatility, Forex, Gold & Crypto Assets @ 80% Flexible Threshold!")
 
     while True:
         try:
@@ -231,15 +255,15 @@ async def market_scanning_loop():
                 current_spread = 0.0001
                 signal, confidence, reason = signal_engine.evaluate_signals(prices_1h, prices_15m, prices_5m, current_spread)
 
-                if signal in ["CALL", "PUT"] and confidence >= 70.0:
-                    logging.info(f"🎯 Valid Trade Signal on {symbol}: {signal} ({confidence}%)")
+                if signal in ["CALL", "PUT"] and confidence >= 80.0:
+                    logging.info(f"🎯 Valid Trade Signal on {symbol}: {signal} ({confidence:.1f}%)")
                     stake = guardian.get_1pct_stake_amount()
                     
                     guardian.active_positions_count += 1
                     success = await execute_deriv_trade(symbol, signal, stake)
                     
                     if success:
-                        await asyncio.sleep(300)  # Wait for 5-minute trade duration to expire
+                        await asyncio.sleep(300) # Wait 5 minutes for trade outcome
                     
                     guardian.active_positions_count = max(0, guardian.active_positions_count - 1)
 
@@ -249,11 +273,10 @@ async def market_scanning_loop():
         await asyncio.sleep(5)
 
 def main():
-    # Start Health Check Server on Port 10000 in background
     t = threading.Thread(target=run_health_server, daemon=True)
     t.start()
 
-    logging.info("🚀 Starting Complete Integrated Master Engine (Rule Set 1 + Rule Set 2 + trend_filter.py)...")
+    logging.info("🚀 Starting Complete Multi-Asset Smart-Balance Engine...")
     asyncio.run(market_scanning_loop())
 
 if __name__ == "__main__":
