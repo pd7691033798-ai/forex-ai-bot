@@ -24,15 +24,15 @@ trend_engine = TrendFilterEngine(ema_period=200)
 smart_engine = SmartMoneyEngine()
 news_guard = EconomicNewsGuard()
 
-# Configuration & Credentials
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8767606359:AAH7dZn_9dsT1HwmOkbvKAB2bgB2aEvOz0c")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6449682719")
-DERIV_APP_ID = os.getenv("DERIV_APP_ID", "68423")
-DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "pat_007694a0cbf4459dbe3d9d3dce0bcc61436142c409443bc11f3e5775ebedab08").strip()
+# FIX 1: Secrets isolated to Environment Variables for Security
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+DERIV_APP_ID = os.getenv("DERIV_APP_ID", "68423").strip()
+DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "").strip()
 
-#   # Deriv Standard Symbol Names (100% Error-Free)
+# Deriv Standard Symbol Names
 SYMBOLS_TO_SCAN = [
-    "R_10", "R_25", "R_50", "R_75", "R_100",  # Deriv Synthetic Volatility (100% Working)
+    "R_10", "R_25", "R_50", "R_75", "R_100",  # Deriv Synthetic Volatility (24/7)
     "frxEURUSD", "frxGBPUSD"                   # Major Forex Pairs
 ]
 
@@ -59,6 +59,9 @@ def run_health_server():
     server.serve_forever()
 
 def send_telegram_message(msg: str):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logging.warning("Telegram Bot Token or Chat ID missing in Environment Variables.")
+        return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
@@ -94,13 +97,20 @@ class RuleSet1CapitalGuardian:
 guardian = RuleSet1CapitalGuardian()
 
 class FlexibleSignalEngine:
+    # FIX 4: Handled ZeroDivision Error in RSI calculation
     def calculate_rsi(self, prices: List[float], period: int = 14) -> float:
         if len(prices) < period + 1: return 50.0
         delta = pd.Series(prices).diff()
         gain = (delta.where(delta > 0, 0)).ewm(alpha=1/period, adjust=False).mean()
         loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/period, adjust=False).mean()
+        
+        last_loss = loss.iloc[-1]
+        if last_loss == 0 or pd.isna(last_loss):
+            return 100.0 if gain.iloc[-1] > 0 else 50.0
+
         rs = gain / loss
-        return float((100 - (100 / (1 + rs))).iloc[-1])
+        rsi_val = 100 - (100 / (1 + rs))
+        return float(rsi_val.iloc[-1])
 
     def calculate_macd(self, prices: List[float]) -> Tuple[float, float]:
         if len(prices) < 26: return 0.0, 0.0
@@ -111,12 +121,10 @@ class FlexibleSignalEngine:
         return float(macd.iloc[-1]), float(signal.iloc[-1])
 
     def evaluate_signals(self, prices_1h: List[float], prices_15m: List[float], prices_5m: List[float], current_spread: float) -> Tuple[str, float, str]:
-        # 1. Economic News Guard Check
         is_news, news_reason = news_guard.is_high_impact_news_near()
         if is_news:
             return "NONE", 0.0, news_reason
 
-        # 2. Smart Money Concepts (SMC) Rule Set 3 Check (Handled safely for tuple format)
         smc_res = smart_engine.evaluate_smart_money_rules(prices_1h, prices_15m, current_spread)
         sm_passed, sm_reason = smc_res[0], smc_res[1]
         sm_boost = smc_res[2] if len(smc_res) > 2 and isinstance(smc_res[2], (int, float)) else 0.0
@@ -124,7 +132,6 @@ class FlexibleSignalEngine:
         if not sm_passed:
             return "NONE", 0.0, f"⚠️ Rule Set 3 Blocked: {sm_reason}"
 
-        # 3. Multi-Timeframe Trend Alignment Check
         alignment = trend_engine.evaluate_multi_timeframe_alignment(prices_1h, prices_15m, prices_5m)
         if not alignment["allowed"]:
             return "NONE", 0.0, f"⚠️ Trend Filter: {alignment['reason']}"
@@ -147,10 +154,8 @@ class FlexibleSignalEngine:
         if votes_call >= 1 and trend_direction == "BULLISH": signal_type = "CALL"
         elif votes_put >= 1 and trend_direction == "BEARISH": signal_type = "PUT"
 
-        # Calculate Final Flexible Confidence Score (Base + Votes + SMC Boost)
         confidence_score = base_confidence + (votes_call * 10 if signal_type == "CALL" else votes_put * 10) + sm_boost
 
-        # Flexible Threshold set to 80% Confidence for High-Quality Weekly Trades
         if confidence_score < 80.0 or signal_type == "NONE":
             return "NONE", confidence_score, "⚠️ Confluence Score below 80% Threshold"
 
@@ -158,37 +163,67 @@ class FlexibleSignalEngine:
 
 signal_engine = FlexibleSignalEngine()
 
-# Deriv API WebSocket Connection
+# Deriv API WebSocket Connection URL
 ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
 
-async def fetch_deriv_candles(symbol: str, granularity: int, count: int = 100) -> List[float]:
-    try:
-        async with websockets.connect(ws_url) as ws:
-            req = {
-                "ticks_history": symbol,
-                "adjust_start_time": 1,
-                "count": count,
-                "end": "latest",
-                "start": 1,
-                "style": "candles",
-                "granularity": granularity
-            }
-            await ws.send(json.dumps(req))
-            resp = await asyncio.wait_for(ws.recv(), timeout=10)
-            data = json.loads(resp)
-            if "candles" in data:
-                return [float(c["close"]) for c in data["candles"]]
-    except Exception as e:
-        logging.error(f"Live Data Fetch Error on {symbol} ({granularity}s): {e}")
+# FIX 3: Multi-frame message reading loop with explicit response validation
+async def fetch_deriv_candles(symbol: str, granularity: int, count: int = 100, retries: int = 3) -> List[float]:
+    for attempt in range(1, retries + 1):
+        try:
+            async with websockets.connect(
+                ws_url,
+                open_timeout=20,
+                close_timeout=10,
+                ping_interval=20,
+                ping_timeout=20
+            ) as ws:
+                req = {
+                    "ticks_history": symbol,
+                    "adjust_start_time": 1,
+                    "count": count,
+                    "end": "latest",
+                    "start": 1,
+                    "style": "candles",
+                    "granularity": granularity
+                }
+                await ws.send(json.dumps(req))
+                
+                # Receive loop to capture the correct response payload
+                start_time = time.time()
+                while time.time() - start_time < 15:
+                    resp = await asyncio.wait_for(ws.recv(), timeout=10)
+                    data = json.loads(resp)
+
+                    if "candles" in data:
+                        return [float(c["close"]) for c in data["candles"]]
+                    elif "error" in data:
+                        logging.warning(f"Deriv API Error on {symbol} ({granularity}s): {data['error']['message']}")
+                        return []
+        except Exception as e:
+            if attempt < retries:
+                await asyncio.sleep(1.5 * attempt)
+            else:
+                logging.error(f"Live Data Fetch Error on {symbol} ({granularity}s): {e}")
     return []
 
 async def execute_deriv_trade(symbol: str, contract_type: str, stake: float) -> bool:
+    if not DERIV_API_TOKEN:
+        logging.error("❌ Deriv API Token Missing in Environment Variables.")
+        return False
+
     try:
-        async with websockets.connect(ws_url) as ws:
+        async with websockets.connect(
+            ws_url,
+            open_timeout=20,
+            close_timeout=10,
+            ping_interval=20,
+            ping_timeout=20
+        ) as ws:
             # 1. Authorize Token
             auth_req = {"authorize": DERIV_API_TOKEN}
             await ws.send(json.dumps(auth_req))
-            auth_resp = await asyncio.wait_for(ws.recv(), timeout=10)
+            
+            auth_resp = await asyncio.wait_for(ws.recv(), timeout=15)
             auth_data = json.loads(auth_resp)
 
             if "error" in auth_data:
@@ -216,7 +251,7 @@ async def execute_deriv_trade(symbol: str, contract_type: str, stake: float) -> 
                 }
             }
             await ws.send(json.dumps(buy_req))
-            buy_resp = await asyncio.wait_for(ws.recv(), timeout=10)
+            buy_resp = await asyncio.wait_for(ws.recv(), timeout=15)
             buy_data = json.loads(buy_resp)
 
             if "error" in buy_data:
@@ -234,7 +269,7 @@ async def execute_deriv_trade(symbol: str, contract_type: str, stake: float) -> 
 
 async def market_scanning_loop():
     logging.info("🔎 Multi-Asset Smart-Balance Scanner Active...")
-    send_telegram_message("🚀 *Multi-Asset Smart-Balance Engine Online*\nScanning Synthetic Volatility, Forex, Gold & Crypto Assets @ 80% Flexible Threshold!")
+    send_telegram_message("🚀 *Multi-Asset Smart-Balance Engine Online*\nScanning Synthetic Volatility & Forex Assets @ 80% Threshold!")
 
     while True:
         try:
@@ -250,6 +285,7 @@ async def market_scanning_loop():
                 prices_5m = await fetch_deriv_candles(symbol, 300, 100)
 
                 if len(prices_1h) < 30 or len(prices_15m) < 30 or len(prices_5m) < 30:
+                    await asyncio.sleep(0.5)
                     continue
 
                 current_spread = 0.0001
@@ -266,6 +302,8 @@ async def market_scanning_loop():
                         await asyncio.sleep(300) # Wait 5 minutes for trade outcome
                     
                     guardian.active_positions_count = max(0, guardian.active_positions_count - 1)
+
+                await asyncio.sleep(0.5)  # FIX 2: Rate limit buffer between symbols
 
         except Exception as e:
             logging.error(f"Market Scanning Loop Error: {e}")
