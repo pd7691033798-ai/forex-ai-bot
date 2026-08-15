@@ -15,7 +15,7 @@ COPY requirements.txt .
 
 # Warning हटाने के लिए --root-user-action=ignore जोड़ा गया है
 RUN pip install --no-cache-dir --upgrade pip
-RUN pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
+ RUN pip install --no-cache-dir --default-timeout=100 --retries 10 --root-user-action=ignore -r requirements.txt
 
 COPY . .
 
