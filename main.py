@@ -12,16 +12,12 @@ import numpy as np
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, List, Tuple
 
-from trend_filter import TrendFilterEngine
-from smart_money import SmartMoneyEngine
 from news_guard import EconomicNewsGuard
 
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 
 # Global Engines
-trend_engine = TrendFilterEngine(ema_period=200)
-smart_engine = SmartMoneyEngine()
 news_guard = EconomicNewsGuard()
 
 # 1. Environment Variables
@@ -96,84 +92,85 @@ class RuleSet1CapitalGuardian:
 
 guardian = RuleSet1CapitalGuardian()
 
-class FlexibleSignalEngine:
-    def calculate_rsi(self, prices: List[float], period: int = 14) -> float:
-        if len(prices) < period + 1: 
-            return 50.0
-        delta = pd.Series(prices).diff()
-        gain = (delta.where(delta > 0, 0)).ewm(alpha=1/period, adjust=False).mean()
-        loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/period, adjust=False).mean()
+# ==================== RELAXED STRATEGY ENGINE ====================
+
+class OptimizedSignalEngine:
+    def calculate_rsi(self, series: pd.Series, period: int = 14) -> pd.Series:
+        delta = series.diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = -delta.where(delta < 0, 0.0)
+        avg_gain = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+        rs = avg_gain / (avg_loss + 1e-9)
+        return 100 - (100 / (1 + rs))
+
+    def calculate_indicators_5m(self, df_5m: pd.DataFrame) -> pd.DataFrame:
+        df = df_5m.copy()
+        df.columns = df.columns.str.lower()
+        df['ema_9'] = df['close'].ewm(span=9, adjust=False).mean()
+        df['ema_21'] = df['close'].ewm(span=21, adjust=False).mean()
+        df['rsi'] = self.calculate_rsi(df['close'], period=14)
         
-        last_loss = loss.iloc[-1]
-        if last_loss == 0 or pd.isna(last_loss):
-            return 100.0 if gain.iloc[-1] > 0 else 50.0
+        high_low = df['high'] - df['low']
+        high_close = (df['high'] - df['close'].shift()).abs()
+        low_close = (df['low'] - df['close'].shift()).abs()
+        ranges = pd.concat([high_low, high_close, low_close], axis=1)
+        df['atr'] = ranges.max(axis=1).rolling(14).mean()
+        return df
 
-        rs = gain / loss
-        rsi_val = 100 - (100 / (1 + rs))
-        return float(rsi_val.iloc[-1])
+    def get_1h_trend(self, df_1h: pd.DataFrame) -> str:
+        df = df_1h.copy()
+        df.columns = df.columns.str.lower()
+        if len(df) < 50:
+            return "NEUTRAL"
+        ema_50 = df['close'].ewm(span=50, adjust=False).mean()
+        current_close = df['close'].iloc[-1]
+        current_ema = ema_50.iloc[-1]
+        
+        if current_close > current_ema:
+            return "UPTREND"
+        elif current_close < current_ema:
+            return "DOWNTREND"
+        return "NEUTRAL"
 
-    def calculate_macd(self, prices: List[float]) -> Tuple[float, float]:
-        if len(prices) < 26: 
-            return 0.0, 0.0
-        ema12 = pd.Series(prices).ewm(span=12, adjust=False).mean()
-        ema26 = pd.Series(prices).ewm(span=26, adjust=False).mean()
-        macd = ema12 - ema26
-        signal = macd.ewm(span=9, adjust=False).mean()
-        return float(macd.iloc[-1]), float(signal.iloc[-1])
-
-    def evaluate_signals(self, prices_1h: List[float], prices_15m: List[float], prices_5m: List[float], current_spread: float) -> Tuple[str, float, str]:
+    def evaluate_signals(self, df_1h: pd.DataFrame, df_5m: pd.DataFrame) -> Tuple[str, str]:
+        # News Check
         is_news, news_reason = news_guard.is_high_impact_news_near()
         if is_news:
-            return "NONE", 0.0, news_reason
+            return "HOLD", f"News Block: {news_reason}"
 
-        smc_res = smart_engine.evaluate_smart_money_rules(prices_1h, prices_15m, current_spread)
-        sm_passed, sm_reason = smc_res[0], smc_res[1]
-        sm_boost = smc_res[2] if len(smc_res) > 2 and isinstance(smc_res[2], (int, float)) else 0.0
+        if df_5m is None or len(df_5m) < 25:
+            return "HOLD", "Insufficient 5M data"
+        if df_1h is None or len(df_1h) < 50:
+            return "HOLD", "Insufficient 1H data"
 
-        if not sm_passed:
-            return "NONE", 0.0, f"⚠️ Rule Set 3 Blocked: {sm_reason}"
-
-        alignment = trend_engine.evaluate_multi_timeframe_alignment(prices_1h, prices_15m, prices_5m)
-        if not alignment.get("allowed", False):
-            return "NONE", 0.0, f"⚠️ Trend Filter: {alignment.get('reason', 'Alignment mismatch')}"
-
-        trend_direction = "BULLISH" if alignment.get("direction") == "BUY" else "BEARISH"
-
-        rsi = self.calculate_rsi(prices_5m)
-        macd, signal = self.calculate_macd(prices_5m)
-
-        base_confidence = 60.0
-        votes_call, votes_put = 0, 0
-
-        if 35 < rsi < 60 and trend_direction == "BULLISH": 
-            votes_call += 1
-        elif 40 < rsi < 65 and trend_direction == "BEARISH": 
-            votes_put += 1
+        df_5m = self.calculate_indicators_5m(df_5m)
+        trend_1h = self.get_1h_trend(df_1h)
         
-        if macd > signal: 
-            votes_call += 1
-        elif macd < signal: 
-            votes_put += 1
+        curr = df_5m.iloc[-1]
+        prev = df_5m.iloc[-2]
 
-        signal_type = "NONE"
-        if votes_call >= 1 and trend_direction == "BULLISH": 
-            signal_type = "CALL"
-        elif votes_put >= 1 and trend_direction == "BEARISH": 
-            signal_type = "PUT"
+        if pd.isna(curr['atr']) or pd.isna(curr['rsi']):
+            return "HOLD", "Indicators warming up (NaN)"
 
-        confidence_score = base_confidence + (votes_call * 10 if signal_type == "CALL" else votes_put * 10) + sm_boost
+        # BUY / CALL Logic
+        ema_bullish_cross = (prev['ema_9'] <= prev['ema_21']) and (curr['ema_9'] > curr['ema_21'])
+        if trend_1h == "UPTREND" and ema_bullish_cross and (35 <= curr['rsi'] <= 65):
+            return "CALL", "1H Uptrend + 5M EMA Cross + Balanced RSI"
 
-        if confidence_score < 80.0 or signal_type == "NONE":
-            return "NONE", confidence_score, "⚠️ Confluence Score below 80% Threshold"
+        # SELL / PUT Logic
+        ema_bearish_cross = (prev['ema_9'] >= prev['ema_21']) and (curr['ema_9'] < curr['ema_21'])
+        if trend_1h == "DOWNTREND" and ema_bearish_cross and (35 <= curr['rsi'] <= 65):
+            return "PUT", "1H Downtrend + 5M EMA Cross + Balanced RSI"
 
-        return signal_type, confidence_score, "🟢 Signal Validated (SMC + Multi-Asset)"
+        return "HOLD", "No condition met"
 
-signal_engine = FlexibleSignalEngine()
+signal_engine = OptimizedSignalEngine()
 
 # Deriv API WebSocket Connection URL
 ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
 
-async def fetch_deriv_candles(symbol: str, granularity: int, count: int = 100, retries: int = 3) -> List[float]:
+async def fetch_deriv_candle_df(symbol: str, granularity: int, count: int = 100, retries: int = 3) -> pd.DataFrame:
     for attempt in range(1, retries + 1):
         try:
             async with websockets.connect(
@@ -200,16 +197,20 @@ async def fetch_deriv_candles(symbol: str, granularity: int, count: int = 100, r
                     data = json.loads(resp)
 
                     if "candles" in data:
-                        return [float(c["close"]) for c in data["candles"]]
+                        df = pd.DataFrame(data["candles"])
+                        for col in ['open', 'high', 'low', 'close', 'epoch']:
+                            if col in df.columns:
+                                df[col] = df[col].astype(float)
+                        return df
                     elif "error" in data:
                         logging.warning(f"Deriv API Error on {symbol} ({granularity}s): {data['error'].get('message', 'Unknown Error')}")
-                        return []
+                        return pd.DataFrame()
         except Exception as e:
             if attempt < retries:
                 await asyncio.sleep(1.0 * attempt)
             else:
                 logging.error(f"Live Data Fetch Error on {symbol} ({granularity}s): {e}")
-    return []
+    return pd.DataFrame()
 
 async def execute_deriv_trade(symbol: str, contract_type: str, stake: float) -> bool:
     if not DERIV_API_TOKEN:
@@ -268,15 +269,21 @@ async def execute_deriv_trade(symbol: str, contract_type: str, stake: float) -> 
 
             contract_id = buy_data["buy"]["contract_id"]
             logging.info(f"✅ Trade Placed Successfully on {symbol}! Contract ID: {contract_id}")
-            send_telegram_message(f"🚀 *HIGH CONFIDENCE TRADE EXECUTED*\n\n*Asset:* `{symbol}`\n*Type:* `{contract_type}`\n*Stake:* `${stake}`\n*Contract ID:* `{contract_id}`\n*Duration:* 5 Min")
+            send_telegram_message(f"🚀 *TRADE EXECUTED*\n\n*Asset:* `{symbol}`\n*Type:* `{contract_type}`\n*Stake:* `${stake}`\n*Contract ID:* `{contract_id}`\n*Duration:* 5 Min")
             return True
     except Exception as e:
         logging.error(f"Trade Execution Exception: {e}")
         return False
 
+async def manage_trade_duration(duration_seconds: int):
+    """Background task to release position lock after duration without freezing scanner"""
+    await asyncio.sleep(duration_seconds)
+    guardian.active_positions_count = max(0, guardian.active_positions_count - 1)
+    logging.info("🔓 Trade duration completed. Position lock released.")
+
 async def market_scanning_loop():
-    logging.info("🔎 Multi-Asset Smart-Balance Scanner Active...")
-    send_telegram_message("🚀 *Multi-Asset Smart-Balance Engine Online*\nScanning Synthetic Volatility & Forex Assets @ 80% Threshold!")
+    logging.info("🔎 Multi-Asset Scanner Active (5M EMA/RSI Strategy with 1H Trend)...")
+    send_telegram_message("🚀 *Multi-Asset Engine Online*\nScanning Assets on 5M EMA & RSI Balanced Strategy!")
 
     while True:
         try:
@@ -287,28 +294,27 @@ async def market_scanning_loop():
                 continue
 
             for symbol in SYMBOLS_TO_SCAN:
-                prices_1h = await fetch_deriv_candles(symbol, 3600, 100)
-                prices_15m = await fetch_deriv_candles(symbol, 900, 100)
-                prices_5m = await fetch_deriv_candles(symbol, 300, 100)
+                df_1h = await fetch_deriv_candle_df(symbol, 3600, 70)
+                df_5m = await fetch_deriv_candle_df(symbol, 300, 50)
 
-                if len(prices_1h) < 30 or len(prices_15m) < 30 or len(prices_5m) < 30:
+                if df_1h.empty or df_5m.empty:
                     await asyncio.sleep(0.3)
                     continue
 
-                current_spread = 0.0001
-                signal, confidence, reason = signal_engine.evaluate_signals(prices_1h, prices_15m, prices_5m, current_spread)
+                signal, reason = signal_engine.evaluate_signals(df_1h, df_5m)
 
-                if signal in ["CALL", "PUT"] and confidence >= 80.0:
-                    logging.info(f"🎯 Valid Trade Signal on {symbol}: {signal} ({confidence:.1f}%)")
+                if signal in ["CALL", "PUT"]:
+                    logging.info(f"🎯 Valid Trade Signal on {symbol}: {signal} | Reason: {reason}")
                     stake = guardian.get_1pct_stake_amount()
                     
                     guardian.active_positions_count += 1
                     success = await execute_deriv_trade(symbol, signal, stake)
                     
                     if success:
-                        await asyncio.sleep(300)  # Wait 5 minutes for trade outcome
-                    
-                    guardian.active_positions_count = max(0, guardian.active_positions_count - 1)
+                        # Non-blocking async timer for 5 minutes
+                        asyncio.create_task(manage_trade_duration(300))
+                    else:
+                        guardian.active_positions_count = max(0, guardian.active_positions_count - 1)
 
                 await asyncio.sleep(0.3)
 
@@ -322,9 +328,8 @@ def main():
     t = threading.Thread(target=run_health_server, daemon=True)
     t.start()
 
-    logging.info("🚀 Starting Complete Multi-Asset Smart-Balance Engine...")
+    logging.info("🚀 Starting Complete Multi-Asset Engine...")
     asyncio.run(market_scanning_loop())
 
 if __name__ == "__main__":
     main()
-        
