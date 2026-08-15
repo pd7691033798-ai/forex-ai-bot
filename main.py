@@ -24,11 +24,11 @@ trend_engine = TrendFilterEngine(ema_period=200)
 smart_engine = SmartMoneyEngine()
 news_guard = EconomicNewsGuard()
 
-# FIX 1: Secrets isolated to Environment Variables for Security
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8767606359:AAH7dZn_9dsT1HwmOkbvKAB2bgB2aEvOz0c").strip()
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6449682719").strip()
-DERIV_APP_ID = os.getenv("DERIV_APP_ID", "68423").strip()
-DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "pat_007694a0cbf4459dbe3d9d3dce0bcc61436142c409443bc11f3e5775ebedab08").strip()
+# 1. Environment Variables
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+DERIV_APP_ID = os.getenv("DERIV_APP_ID", "347EsezJThZVMeqwcJvlI").strip()
+DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "").strip()
 
 # Deriv Standard Symbol Names
 SYMBOLS_TO_SCAN = [
@@ -97,9 +97,9 @@ class RuleSet1CapitalGuardian:
 guardian = RuleSet1CapitalGuardian()
 
 class FlexibleSignalEngine:
-    # FIX 4: Handled ZeroDivision Error in RSI calculation
     def calculate_rsi(self, prices: List[float], period: int = 14) -> float:
-        if len(prices) < period + 1: return 50.0
+        if len(prices) < period + 1: 
+            return 50.0
         delta = pd.Series(prices).diff()
         gain = (delta.where(delta > 0, 0)).ewm(alpha=1/period, adjust=False).mean()
         loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/period, adjust=False).mean()
@@ -113,7 +113,8 @@ class FlexibleSignalEngine:
         return float(rsi_val.iloc[-1])
 
     def calculate_macd(self, prices: List[float]) -> Tuple[float, float]:
-        if len(prices) < 26: return 0.0, 0.0
+        if len(prices) < 26: 
+            return 0.0, 0.0
         ema12 = pd.Series(prices).ewm(span=12, adjust=False).mean()
         ema26 = pd.Series(prices).ewm(span=26, adjust=False).mean()
         macd = ema12 - ema26
@@ -133,10 +134,10 @@ class FlexibleSignalEngine:
             return "NONE", 0.0, f"⚠️ Rule Set 3 Blocked: {sm_reason}"
 
         alignment = trend_engine.evaluate_multi_timeframe_alignment(prices_1h, prices_15m, prices_5m)
-        if not alignment["allowed"]:
-            return "NONE", 0.0, f"⚠️ Trend Filter: {alignment['reason']}"
+        if not alignment.get("allowed", False):
+            return "NONE", 0.0, f"⚠️ Trend Filter: {alignment.get('reason', 'Alignment mismatch')}"
 
-        trend_direction = "BULLISH" if alignment["direction"] == "BUY" else "BEARISH"
+        trend_direction = "BULLISH" if alignment.get("direction") == "BUY" else "BEARISH"
 
         rsi = self.calculate_rsi(prices_5m)
         macd, signal = self.calculate_macd(prices_5m)
@@ -144,15 +145,21 @@ class FlexibleSignalEngine:
         base_confidence = 60.0
         votes_call, votes_put = 0, 0
 
-        if 35 < rsi < 60 and trend_direction == "BULLISH": votes_call += 1
-        elif 40 < rsi < 65 and trend_direction == "BEARISH": votes_put += 1
+        if 35 < rsi < 60 and trend_direction == "BULLISH": 
+            votes_call += 1
+        elif 40 < rsi < 65 and trend_direction == "BEARISH": 
+            votes_put += 1
         
-        if macd > signal: votes_call += 1
-        elif macd < signal: votes_put += 1
+        if macd > signal: 
+            votes_call += 1
+        elif macd < signal: 
+            votes_put += 1
 
         signal_type = "NONE"
-        if votes_call >= 1 and trend_direction == "BULLISH": signal_type = "CALL"
-        elif votes_put >= 1 and trend_direction == "BEARISH": signal_type = "PUT"
+        if votes_call >= 1 and trend_direction == "BULLISH": 
+            signal_type = "CALL"
+        elif votes_put >= 1 and trend_direction == "BEARISH": 
+            signal_type = "PUT"
 
         confidence_score = base_confidence + (votes_call * 10 if signal_type == "CALL" else votes_put * 10) + sm_boost
 
@@ -166,7 +173,6 @@ signal_engine = FlexibleSignalEngine()
 # Deriv API WebSocket Connection URL
 ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
 
-# FIX 3: Multi-frame message reading loop with explicit response validation
 async def fetch_deriv_candles(symbol: str, granularity: int, count: int = 100, retries: int = 3) -> List[float]:
     for attempt in range(1, retries + 1):
         try:
@@ -188,20 +194,19 @@ async def fetch_deriv_candles(symbol: str, granularity: int, count: int = 100, r
                 }
                 await ws.send(json.dumps(req))
                 
-                # Receive loop to capture the correct response payload
                 start_time = time.time()
-                while time.time() - start_time < 15:
-                    resp = await asyncio.wait_for(ws.recv(), timeout=10)
+                while time.time() - start_time < 10:
+                    resp = await asyncio.wait_for(ws.recv(), timeout=5)
                     data = json.loads(resp)
 
                     if "candles" in data:
                         return [float(c["close"]) for c in data["candles"]]
                     elif "error" in data:
-                        logging.warning(f"Deriv API Error on {symbol} ({granularity}s): {data['error']['message']}")
+                        logging.warning(f"Deriv API Error on {symbol} ({granularity}s): {data['error'].get('message', 'Unknown Error')}")
                         return []
         except Exception as e:
             if attempt < retries:
-                await asyncio.sleep(1.5 * attempt)
+                await asyncio.sleep(1.0 * attempt)
             else:
                 logging.error(f"Live Data Fetch Error on {symbol} ({granularity}s): {e}")
     return []
@@ -209,6 +214,7 @@ async def fetch_deriv_candles(symbol: str, granularity: int, count: int = 100, r
 async def execute_deriv_trade(symbol: str, contract_type: str, stake: float) -> bool:
     if not DERIV_API_TOKEN:
         logging.error("❌ Deriv API Token Missing in Environment Variables.")
+        send_telegram_message("❌ *Deriv Trade Error*: `DERIV_API_TOKEN` environment variable me nahi mila.")
         return False
 
     try:
@@ -227,7 +233,7 @@ async def execute_deriv_trade(symbol: str, contract_type: str, stake: float) -> 
             auth_data = json.loads(auth_resp)
 
             if "error" in auth_data:
-                err_msg = auth_data["error"]["message"]
+                err_msg = auth_data["error"].get("message", "Authorization failed")
                 logging.error(f"❌ Deriv Auth Error: {err_msg}")
                 send_telegram_message(f"❌ *Deriv Auth Error*: {err_msg}\nPlease verify API Token permissions.")
                 return False
@@ -255,13 +261,14 @@ async def execute_deriv_trade(symbol: str, contract_type: str, stake: float) -> 
             buy_data = json.loads(buy_resp)
 
             if "error" in buy_data:
-                logging.error(f"❌ Trade Execution Error: {buy_data['error']}")
-                send_telegram_message(f"⚠️ *Trade Failed* on {symbol}: {buy_data['error']['message']}")
+                err_msg = buy_data["error"].get("message", "Order Rejected")
+                logging.error(f"❌ Trade Execution Error: {err_msg}")
+                send_telegram_message(f"⚠️ *Trade Failed* on {symbol}: {err_msg}")
                 return False
 
             contract_id = buy_data["buy"]["contract_id"]
             logging.info(f"✅ Trade Placed Successfully on {symbol}! Contract ID: {contract_id}")
-            send_telegram_message(f"🚀 *HIGH CONFIDENCE TRADE EXECUTED*\n\n*Asset:* {symbol}\n*Type:* {contract_type}\n*Stake:* ${stake}\n*Contract ID:* {contract_id}\n*Duration:* 5 Min")
+            send_telegram_message(f"🚀 *HIGH CONFIDENCE TRADE EXECUTED*\n\n*Asset:* `{symbol}`\n*Type:* `{contract_type}`\n*Stake:* `${stake}`\n*Contract ID:* `{contract_id}`\n*Duration:* 5 Min")
             return True
     except Exception as e:
         logging.error(f"Trade Execution Exception: {e}")
@@ -285,7 +292,7 @@ async def market_scanning_loop():
                 prices_5m = await fetch_deriv_candles(symbol, 300, 100)
 
                 if len(prices_1h) < 30 or len(prices_15m) < 30 or len(prices_5m) < 30:
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.3)
                     continue
 
                 current_spread = 0.0001
@@ -299,11 +306,11 @@ async def market_scanning_loop():
                     success = await execute_deriv_trade(symbol, signal, stake)
                     
                     if success:
-                        await asyncio.sleep(300) # Wait 5 minutes for trade outcome
+                        await asyncio.sleep(300)  # Wait 5 minutes for trade outcome
                     
                     guardian.active_positions_count = max(0, guardian.active_positions_count - 1)
 
-                await asyncio.sleep(0.5)  # FIX 2: Rate limit buffer between symbols
+                await asyncio.sleep(0.3)
 
         except Exception as e:
             logging.error(f"Market Scanning Loop Error: {e}")
@@ -311,6 +318,7 @@ async def market_scanning_loop():
         await asyncio.sleep(5)
 
 def main():
+    # Start Health Check Server for Render
     t = threading.Thread(target=run_health_server, daemon=True)
     t.start()
 
@@ -319,3 +327,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+        
