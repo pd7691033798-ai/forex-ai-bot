@@ -25,10 +25,10 @@ smart_engine = SmartMoneyEngine()
 news_guard = EconomicNewsGuard()
 
 # FIX 1: Secrets isolated to Environment Variables for Security
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8767606359:AAH7dZn_9dsT1HwmOkbvKAB2bgB2aEvOz0c").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6449682719").strip()
 DERIV_APP_ID = os.getenv("DERIV_APP_ID", "68423").strip()
-DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "").strip()
+DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "pat_007694a0cbf4459dbe3d9d3dce0bcc61436142c409443bc11f3e5775ebedab08").strip()
 
 # Deriv Standard Symbol Names
 SYMBOLS_TO_SCAN = [
