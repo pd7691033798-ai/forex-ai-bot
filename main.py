@@ -27,7 +27,7 @@ news_guard = EconomicNewsGuard()
 # 1. Environment Variables
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-DERIV_APP_ID = os.getenv("DERIV_APP_ID", "347EsezJThZVMeqwcJvlI").strip()
+DERIV_APP_ID = os.getenv("DERIV_APP_ID", "1089").strip()
 DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "").strip()
 
 # Deriv Standard Symbol Names
