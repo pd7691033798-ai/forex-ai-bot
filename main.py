@@ -19,37 +19,15 @@ logging.basicConfig(
 )
 
 # ---------------------------------------------------------
-# 1. 4-Agent Trading Engine Import
-# ---------------------------------------------------------
-try:
-    from trading_engine import TradingEngineCore
-    from trading_engine import main as run_ai_trading_engine
-except ImportError:
-    TradingEngineCore = None
-    run_ai_trading_engine = None
-
-# ---------------------------------------------------------
-# 2. Economic News Guard Import
-# ---------------------------------------------------------
-try:
-    from news_guard import EconomicNewsGuard
-    news_guard = EconomicNewsGuard()
-except ImportError:
-    class EconomicNewsGuardFallback:
-        def is_high_impact_news_near(
-            self, symbol: str = ""
-        ) -> Tuple[bool, str]:
-            return False, "Clear"
-
-    news_guard = EconomicNewsGuardFallback()
-
-# ---------------------------------------------------------
-# Environment Variables
+# Environment Variables & Global Config
 # ---------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 DERIV_APP_ID = os.getenv("DERIV_APP_ID", "1089").strip()
 DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "").strip()
+
+# Mode: "AUTO" (24/7 Execution) ya "COPILOT" (Manual Approval)
+CURRENT_TRADING_MODE = os.getenv("TRADING_MODE", "COPILOT").upper()
 
 SYMBOLS_TO_SCAN = [
     "R_10",
@@ -61,15 +39,20 @@ SYMBOLS_TO_SCAN = [
     "frxGBPUSD",  # Major Forex Pairs
 ]
 
+PENDING_COPILOT_SIGNALS: Dict[str, Dict[str, Any]] = {}
+copilot_lock = asyncio.Lock()
+ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
+
 # ---------------------------------------------------------
-# Render Health Check Dummy HTTP Server
+# Health Check Server for Render / Cloud Hosting
 # ---------------------------------------------------------
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"OK - Smart Balance Master Engine Active")
+        mode_text = f"OK - Master Engine Active | Rules 78,89,90 Online | Mode: {CURRENT_TRADING_MODE}"
+        self.wfile.write(mode_text.encode("utf-8"))
 
     def do_HEAD(self):
         self.send_response(200)
@@ -77,7 +60,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def log_message(self, format, *args):
-        # Render की बार-बार आने वाली पिंग रिक्वेस्ट्स के फालतू लॉग दबाने के लिए
         return
 
 def run_health_server():
@@ -86,25 +68,53 @@ def run_health_server():
     logging.info(f"🌐 Health Check Server running on port {port}")
     server.serve_forever()
 
-def send_telegram_message(msg: str):
+# ---------------------------------------------------------
+# Telegram Bot Alerts & 1-Click Interactive Markup (Non-blocking)
+# ---------------------------------------------------------
+async def send_telegram_message_async(msg: str, reply_markup: dict = None):
+    """Rule Check: requests.post ko asyncio.to_thread me non-blocking banaya gaya"""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": msg,
+        "parse_mode": "Markdown",
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        requests.post(
-            url,
-            json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": msg,
-                "parse_mode": "Markdown",
-            },
-            timeout=5,
-        )
+        await asyncio.to_thread(requests.post, url, json=payload, timeout=5)
     except Exception as e:
-        logging.error(f"Telegram Error: {e}")
+        logging.error(f"Telegram Async Send Error: {e}")
+
+async def send_copilot_trade_request(sig_id: str, symbol: str, signal: str, stake: float, duration: int, duration_unit: str, reason: str):
+    unit_str = "Min" if duration_unit == "m" else ("Hours" if duration_unit == "h" else "Ticks")
+    msg = (
+        f"🎯 *NEW SIGNAL ALERT (COPILOT)*\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📈 *Asset:* `{symbol}`\n"
+        f"🧭 *Signal:* `{signal}`\n"
+        f"💰 *Kelly Stake (Rule 89):* `${stake}`\n"
+        f"⏳ *Duration (Rule 90):* `{duration} {unit_str}`\n"
+        f"🧠 *Reason:* _{reason}_\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"👇 *ट्रेड कन्फर्म करें:*"
+    )
+    reply_markup = {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Approve Trade", "callback_data": f"APPROVE_{sig_id}"},
+                {"text": "❌ Reject", "callback_data": f"REJECT_{sig_id}"}
+            ]
+        ]
+    }
+    await send_telegram_message_async(msg, reply_markup=reply_markup)
 
 # ---------------------------------------------------------
-# Capital Guardian (Rule Set 1)
+# Capital Guardian & Rule 89 (Kelly Criterion Sizing)
 # ---------------------------------------------------------
 class RuleSet1CapitalGuardian:
     def __init__(self, initial_balance: float = 10000.0):
@@ -112,7 +122,6 @@ class RuleSet1CapitalGuardian:
         self.current_balance = initial_balance
         self.equity = initial_balance
         self.daily_start_balance = initial_balance
-        self.risk_per_trade_pct = 1.0
         self.max_daily_loss_pct = 3.0
         self.active_positions_count = 0
         self.lock = asyncio.Lock()
@@ -121,9 +130,18 @@ class RuleSet1CapitalGuardian:
         self.current_balance = balance
         self.equity = balance
 
-    def get_1pct_stake_amount(self):
-        stake = self.current_balance * (self.risk_per_trade_pct / 100.0)
-        return round(max(1.0, stake), 2)
+    def calculate_kelly_stake(self, win_rate: float = 0.60, payout_ratio: float = 0.85) -> float:
+        """Rule 89: Fractional Kelly Criterion Position Sizing"""
+        b = payout_ratio
+        p = win_rate
+        q = 1.0 - p
+        
+        kelly_fraction = p - (q / b)
+        fractional_kelly = max(0.005, kelly_fraction * 0.25)  # Quarter-Kelly
+        
+        safe_risk_pct = min(2.5, max(0.5, fractional_kelly * 100.0))
+        calculated_stake = self.current_balance * (safe_risk_pct / 100.0)
+        return round(max(1.0, calculated_stake), 2)
 
     def check_safety_guards(self) -> Tuple[bool, str]:
         daily_loss = (
@@ -132,10 +150,7 @@ class RuleSet1CapitalGuardian:
             * 100.0
         )
         if daily_loss >= self.max_daily_loss_pct:
-            return (
-                False,
-                f"🛡️ Rule 2: Daily Loss Limit Triggered ({daily_loss:.2f}%)",
-            )
+            return False, f"🛡️ Rule 2: Daily Loss Limit Triggered ({daily_loss:.2f}%)"
         if self.active_positions_count >= 1:
             return False, "🛡️ Max Concurrent Trades Limit Reached (1 Active Max)"
         return True, "🟢 Clear"
@@ -143,9 +158,9 @@ class RuleSet1CapitalGuardian:
 guardian = RuleSet1CapitalGuardian()
 
 # ---------------------------------------------------------
-# Strategy & Signal Engine
+# Strategy Engine + Rule 78 (VPIN) + Rule 90 (ATR Duration)
 # ---------------------------------------------------------
-class OptimizedSignalEngine:
+class AdvancedQuantSignalEngine:
     def calculate_rsi(self, series: pd.Series, period: int = 14) -> pd.Series:
         delta = series.diff()
         gain = delta.where(delta > 0, 0.0)
@@ -154,6 +169,40 @@ class OptimizedSignalEngine:
         avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
         rs = avg_gain / (avg_loss + 1e-9)
         return 100 - (100 / (1 + rs))
+
+    def calculate_vpin_toxicity(self, df: pd.DataFrame, bucket_size: int = 20) -> float:
+        """Rule 78: Order Flow Toxicity & VPIN Approximation"""
+        if len(df) < bucket_size:
+            return 0.0
+        
+        df = df.copy()
+        price_diff = df["close"].diff().fillna(0)
+        
+        buy_vol = np.where(price_diff > 0, df["close"], 0.0)
+        sell_vol = np.where(price_diff < 0, df["close"], 0.0)
+        
+        imbalance = np.abs(buy_vol - sell_vol)
+        total_volume = buy_vol + sell_vol + 1e-9
+        
+        vpin_score = np.mean(imbalance[-bucket_size:]) / np.mean(total_volume[-bucket_size:])
+        return float(vpin_score)
+
+    def calculate_adaptive_duration(self, df_5m: pd.DataFrame, symbol: str) -> Tuple[int, str]:
+        """Rule 90: Volatility-Adjusted Duration with Asset Format Handling"""
+        if symbol.startswith("frx"):
+            return 1, "h"  # Forex pairs ke liye 1 hour standard duration
+
+        curr = df_5m.iloc[-1]
+        atr = curr.get("atr", 0.0)
+        close = curr.get("close", 1.0)
+        
+        volatility_ratio = (atr / close) * 1000.0 if close > 0 else 1.0
+        
+        if volatility_ratio > 3.0:
+            return 2, "m"
+        elif volatility_ratio < 0.8:
+            return 10, "m"
+        return 5, "m"
 
     def calculate_indicators_5m(self, df_5m: pd.DataFrame) -> pd.DataFrame:
         df = df_5m.copy()
@@ -186,43 +235,41 @@ class OptimizedSignalEngine:
 
     def evaluate_signals(
         self, symbol: str, df_1h: pd.DataFrame, df_5m: pd.DataFrame
-    ) -> Tuple[str, str]:
-        if symbol.startswith("frx"):
-            is_news, news_reason = news_guard.is_high_impact_news_near(symbol)
-            if is_news:
-                return "HOLD", f"News Block: {news_reason}"
+    ) -> Tuple[str, str, int, str]:
+        if df_5m is None or len(df_5m) < 25 or df_1h is None or len(df_1h) < 50:
+            return "HOLD", "Insufficient Data", 5, "m"
 
-        if df_5m is None or len(df_5m) < 25:
-            return "HOLD", "Insufficient 5M data"
-        if df_1h is None or len(df_1h) < 50:
-            return "HOLD", "Insufficient 1H data"
-
+        # Fix 1: Indicators ko pehle calculate karein taki ATR available ho
         df_5m = self.calculate_indicators_5m(df_5m)
-        trend_1h = self.get_1h_trend(df_1h)
+        duration, duration_unit = self.calculate_adaptive_duration(df_5m, symbol)
 
+        # Rule 78: Check VPIN Toxicity
+        vpin = self.calculate_vpin_toxicity(df_5m)
+        if vpin > 0.75:
+            return "HOLD", f"Rule 78 Block: High Toxicity Flow (VPIN: {vpin:.2f})", duration, duration_unit
+
+        trend_1h = self.get_1h_trend(df_1h)
         curr = df_5m.iloc[-1]
         prev = df_5m.iloc[-2]
 
         if pd.isna(curr["atr"]) or pd.isna(curr["rsi"]):
-            return "HOLD", "Indicators warming up (NaN)"
+            return "HOLD", "Indicators warming up", duration, duration_unit
 
-        ema_bullish_cross = (prev["ema_9"] <= prev["ema_21"]) and (
-            curr["ema_9"] > curr["ema_21"]
-        )
-        if trend_1h == "UPTREND" and ema_bullish_cross and (35 <= curr["rsi"] <= 65):
-            return "CALL", "1H Uptrend + 5M EMA Cross + Balanced RSI"
+        ema_bullish = (prev["ema_9"] <= prev["ema_21"]) and (curr["ema_9"] > curr["ema_21"])
+        if trend_1h == "UPTREND" and ema_bullish and (38 <= curr["rsi"] <= 62):
+            return "CALL", f"1H Trend + 5M EMA Cross (VPIN Safe: {vpin:.2f})", duration, duration_unit
 
-        ema_bearish_cross = (prev["ema_9"] >= prev["ema_21"]) and (
-            curr["ema_9"] < curr["ema_21"]
-        )
-        if trend_1h == "DOWNTREND" and ema_bearish_cross and (35 <= curr["rsi"] <= 65):
-            return "PUT", "1H Downtrend + 5M EMA Cross + Balanced RSI"
+        ema_bearish = (prev["ema_9"] >= prev["ema_21"]) and (curr["ema_9"] < curr["ema_21"])
+        if trend_1h == "DOWNTREND" and ema_bearish and (38 <= curr["rsi"] <= 62):
+            return "PUT", f"1H Trend + 5M EMA Cross (VPIN Safe: {vpin:.2f})", duration, duration_unit
 
-        return "HOLD", "No condition met"
+        return "HOLD", "No Clear Setup", duration, duration_unit
 
-signal_engine = OptimizedSignalEngine()
-ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
+signal_engine = AdvancedQuantSignalEngine()
 
+# ---------------------------------------------------------
+# Execution & WebSockets
+# ---------------------------------------------------------
 async def fetch_deriv_candle_df(
     symbol: str, granularity: int, count: int = 100, retries: int = 3
 ) -> pd.DataFrame:
@@ -261,29 +308,17 @@ async def fetch_deriv_candle_df(
                                 df[col] = df[col].astype(float)
                         return df
                     elif "error" in data:
-                        logging.warning(
-                            f"Deriv API Error on {symbol} ({granularity}s):"
-                            f" {data['error'].get('message', 'Unknown Error')}"
-                        )
                         return pd.DataFrame()
-        except Exception as e:
+        except Exception:
             if attempt < retries:
                 await asyncio.sleep(1.0 * attempt)
-            else:
-                logging.error(
-                    f"Live Data Fetch Error on {symbol} ({granularity}s): {e}"
-                )
     return pd.DataFrame()
 
 async def execute_deriv_trade(
-    symbol: str, contract_type: str, stake: float
+    symbol: str, contract_type: str, stake: float, duration: int = 5, duration_unit: str = "m"
 ) -> bool:
     if not DERIV_API_TOKEN:
-        logging.error("❌ Deriv API Token Missing in Environment Variables.")
-        send_telegram_message(
-            "❌ *Deriv Trade Error*: `DERIV_API_TOKEN` environment variable me nahi"
-            " mila."
-        )
+        logging.error("❌ Deriv API Token Missing.")
         return False
 
     try:
@@ -301,18 +336,13 @@ async def execute_deriv_trade(
             auth_data = json.loads(auth_resp)
 
             if "error" in auth_data:
-                err_msg = auth_data["error"].get("message", "Authorization failed")
-                logging.error(f"❌ Deriv Auth Error: {err_msg}")
-                send_telegram_message(
-                    f"❌ *Deriv Auth Error*: {err_msg}\nPlease verify API Token"
-                    " permissions."
-                )
+                err = auth_data["error"].get("message", "Authorization failed")
+                logging.error(f"❌ Deriv Auth Error: {err}")
+                await send_telegram_message_async(f"❌ *Deriv Auth Error*: {err}")
                 return False
 
             if "authorize" in auth_data:
-                bal = float(
-                    auth_data["authorize"].get("balance", guardian.current_balance)
-                )
+                bal = float(auth_data["authorize"].get("balance", guardian.current_balance))
                 guardian.update_balance(bal)
 
             buy_req = {
@@ -323,8 +353,8 @@ async def execute_deriv_trade(
                     "basis": "stake",
                     "contract_type": contract_type,
                     "currency": "USD",
-                    "duration": 5,
-                    "duration_unit": "m",
+                    "duration": duration,
+                    "duration_unit": duration_unit,
                     "symbol": symbol,
                 },
             }
@@ -334,111 +364,115 @@ async def execute_deriv_trade(
 
             if "error" in buy_data:
                 err_msg = buy_data["error"].get("message", "Order Rejected")
-                logging.error(f"❌ Trade Execution Error: {err_msg}")
-                send_telegram_message(f"⚠️ *Trade Failed* on {symbol}: {err_msg}")
+                err_code = buy_data["error"].get("code", "N/A")
+                logging.error(f"❌ Execution Error [{err_code}]: {err_msg}")
+                await send_telegram_message_async(f"⚠️ *Trade Failed* on `{symbol}`: {err_msg} (`{err_code}`)")
                 return False
 
             contract_id = buy_data["buy"]["contract_id"]
-            logging.info(
-                f"✅ Trade Placed Successfully on {symbol}! Contract ID:"
-                f" {contract_id}"
-            )
-            send_telegram_message(
-                f"🚀 *TRADE EXECUTED*\n\n*Asset:* `{symbol}`\n*Type:*"
-                f" `{contract_type}`\n*Stake:* `${stake}`\n*Contract ID:*"
-                f" `{contract_id}`\n*Duration:* 5 Min"
+            logging.info(f"✅ Executed {contract_type} on {symbol} | ID: {contract_id}")
+            unit_text = "Min" if duration_unit == "m" else ("Hours" if duration_unit == "h" else "Ticks")
+            await send_telegram_message_async(
+                f"🚀 *TRADE EXECUTED*\n\n"
+                f"📈 *Asset:* `{symbol}`\n"
+                f"🧭 *Type:* `{contract_type}`\n"
+                f"💰 *Stake (Rule 89):* `${stake}`\n"
+                f"⏳ *Duration (Rule 90):* `{duration} {unit_text}`\n"
+                f"🆔 *Contract ID:* `{contract_id}`"
             )
             return True
     except Exception as e:
-        logging.error(f"Trade Execution Exception: {e}")
+        logging.error(f"Trade Exception: {e}")
         return False
 
 async def manage_trade_duration(duration_seconds: int):
     await asyncio.sleep(duration_seconds)
     async with guardian.lock:
         guardian.active_positions_count = max(0, guardian.active_positions_count - 1)
-    logging.info("🔓 Trade duration completed. Position lock released.")
+    logging.info("🔓 Position lock released.")
 
-async def market_scanning_loop():
-    logging.info(
-        "🔎 Multi-Asset Scanner Active (5M EMA/RSI Strategy with 1H Trend)..."
-    )
-    send_telegram_message(
-        "🚀 *Multi-Asset Engine Online*\nScanning Assets on 5M EMA & RSI Balanced"
-        " Strategy!"
-    )
+# ---------------------------------------------------------
+# Telegram Copilot Listener (Non-blocking Async Loop)
+# ---------------------------------------------------------
+async def telegram_copilot_listener():
+    global CURRENT_TRADING_MODE
+    if not TELEGRAM_BOT_TOKEN:
+        return
+
+    offset = 0
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
 
     while True:
         try:
-            is_safe, safety_reason = guardian.check_safety_guards()
-            if not is_safe:
-                logging.warning(f"Safety Guard Active: {safety_reason}")
-                await asyncio.sleep(15)
-                continue
+            # Fix 2: Non-blocking HTTP Call using asyncio.to_thread
+            resp = await asyncio.to_thread(
+                requests.get, url, params={"offset": offset, "timeout": 10}, timeout=12
+            )
+            if resp.status_code == 200:
+                updates = resp.json().get("result", [])
+                for u in updates:
+                    offset = u["update_id"] + 1
 
-            for symbol in SYMBOLS_TO_SCAN:
-                df_1h = await fetch_deriv_candle_df(symbol, 3600, 70)
-                df_5m = await fetch_deriv_candle_df(symbol, 300, 50)
+                    if "message" in u and "text" in u["message"]:
+                        chat_id = str(u["message"]["chat"]["id"])
+                        text = u["message"]["text"].strip()
+                        if chat_id == TELEGRAM_CHAT_ID:
+                            if text.lower() == "/mode auto":
+                                CURRENT_TRADING_MODE = "AUTO"
+                                await send_telegram_message_async("🔄 Mode switched to: *24/7 AUTO* 🤖")
+                            elif text.lower() == "/mode copilot":
+                                CURRENT_TRADING_MODE = "COPILOT"
+                                await send_telegram_message_async("🔄 Mode switched to: *MANUAL COPILOT* 👨‍✈️")
+                            elif text.lower() == "/status":
+                                await send_telegram_message_async(
+                                    f"📊 *SYSTEM STATUS*\n"
+                                    f"• Mode: `{CURRENT_TRADING_MODE}`\n"
+                                    f"• Balance: `${guardian.current_balance}`\n"
+                                    f"• Active Positions: `{guardian.active_positions_count}`\n"
+                                    f"• Rules Active: `Rule 1-15, 78 (VPIN), 89 (Kelly), 90 (ATR Duration)`"
+                                )
 
-                if df_1h.empty or df_5m.empty:
-                    await asyncio.sleep(0.3)
-                    continue
+                    if "callback_query" in u:
+                        cb = u["callback_query"]
+                        cb_data = cb.get("data", "")
+                        cb_id = cb.get("id")
 
-                signal, reason = signal_engine.evaluate_signals(symbol, df_1h, df_5m)
+                        await asyncio.to_thread(
+                            requests.post,
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
+                            json={"callback_query_id": cb_id},
+                            timeout=5
+                        )
 
-                if signal in ["CALL", "PUT"]:
-                    logging.info(
-                        f"🎯 Valid Trade Signal on {symbol}: {signal} | Reason: {reason}"
-                    )
-                    stake = guardian.get_1pct_stake_amount()
+                        if cb_data.startswith("APPROVE_"):
+                            sig_id = cb_data.replace("APPROVE_", "")
+                            item = None
+                            
+                            # Fix 3: Thread-safe queue access using Lock
+                            async with copilot_lock:
+                                if sig_id in PENDING_COPILOT_SIGNALS:
+                                    item = PENDING_COPILOT_SIGNALS.pop(sig_id)
 
-                    async with guardian.lock:
-                        guardian.active_positions_count += 1
+                            if item:
+                                is_safe, reason = guardian.check_safety_guards()
+                                if not is_safe:
+                                    await send_telegram_message_async(f"🛑 Blocked: {reason}")
+                                    continue
 
-                    success = await execute_deriv_trade(symbol, signal, stake)
+                                async with guardian.lock:
+                                    guardian.active_positions_count += 1
 
-                    if success:
-                        asyncio.create_task(manage_trade_duration(300))
-                    else:
-                        async with guardian.lock:
-                            guardian.active_positions_count = max(
-                                0, guardian.active_positions_count - 1
-                            )
+                                success = await execute_deriv_trade(
+                                    item["symbol"], item["signal"], item["stake"], item["duration"], item["duration_unit"]
+                                )
+                                if success:
+                                    duration_sec = item["duration"] * 3600 if item["duration_unit"] == "h" else item["duration"] * 60
+                                    asyncio.create_task(manage_trade_duration(duration_sec))
+                                else:
+                                    async with guardian.lock:
+                                        guardian.active_positions_count = max(0, guardian.active_positions_count - 1)
+                            else:
+                                await send_telegram_message_async("⚠️ Signal expired or already executed.")
 
-                await asyncio.sleep(0.3)
-
-        except Exception as e:
-            logging.error(f"Market Scanning Loop Error: {e}")
-
-        await asyncio.sleep(5)
-
-# ---------------------------------------------------------
-# Master Main Coroutine
-# ---------------------------------------------------------
-async def master_main():
-    logging.info("🚀 Initializing Master Execution Engine...")
-    tasks = [asyncio.create_task(market_scanning_loop())]
-
-    if run_ai_trading_engine:
-        logging.info("🧠 4-Agent Multi-AI Trading Engine Pipeline started.")
-        tasks.append(asyncio.create_task(run_ai_trading_engine()))
-
-    try:
-        await asyncio.gather(*tasks)
-    except asyncio.CancelledError:
-        for t in tasks:
-            t.cancel()
-
-def main():
-    # 1. सबसे पहले Render के लिए बैकग्राउंड पोर्ट सर्वर शुरू करें
-    t = threading.Thread(target=run_health_server, daemon=True)
-    t.start()
-
-    # 2. मुख्य ट्रेडिंग इंजन शुरू करें
-    try:
-        asyncio.run(master_main())
-    except (KeyboardInterrupt, SystemExit):
-        logging.info("🛑 Shutting down Master Engine gracefully...")
-
-if __name__ == "__main__":
-    main()
+                        elif cb_data.startswith("REJECT_"):
+                            sig_i
